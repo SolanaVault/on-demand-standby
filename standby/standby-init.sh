@@ -120,7 +120,10 @@ print(json.dumps(out))')
   else
     fail "not enough disk: free disks=$CANDS root_free=${ROOT_FREE_GB}GB (need ${MIN_ACCOUNTS_GB}+${MIN_LEDGER_GB} GB)"
   fi
-  log "layout: $LAYOUT accounts=${ACC_DEV:-rootfs} ledger=${LED_DEV:-${ACC_DEV:+same disk}}${LED_DEV:-${ACC_DEV:-rootfs}}"
+  if [ -n "$LED_DEV" ]; then led_desc=$LED_DEV
+  elif [ -n "$ACC_DEV" ]; then led_desc="same disk as accounts"
+  else led_desc=rootfs; fi
+  log "layout: $LAYOUT accounts=${ACC_DEV:-rootfs} ledger=$led_desc"
 fi
 if [ "$MODE" = check ]; then
   echo "RESULT {\"ok\":true,\"check_only\":true,\"layout\":\"$LAYOUT\",\"iface\":\"$IFACE\",\"threads\":$threads,\"ram_gib\":$ram_gib}"; exit 0

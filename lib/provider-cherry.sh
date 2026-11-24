@@ -62,7 +62,9 @@ sys.exit(1)' "$plan"; then part=",\"os_partition_size\":${CHERRY_OS_PARTITION_GB
 
 cherry_state(){
   ch "$CH_API/servers/$1" | python3 -I -c 'import json,sys
-d=json.load(sys.stdin)
+try: d=json.load(sys.stdin)
+except ValueError: print("wait"); sys.exit()   # empty/invalid API answer: just poll again
+if not isinstance(d,dict): print("wait"); sys.exit()
 if d.get("code")==404: print("gone"); sys.exit()
 ip=[i["address"] for i in d.get("ip_addresses",[]) if i["type"]=="primary-ip"]
 print("ready "+ip[0] if d.get("status")=="deployed" and ip else "wait")'
