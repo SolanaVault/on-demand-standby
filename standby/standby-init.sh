@@ -16,13 +16,22 @@ cd "$(dirname "$0")"
 # shellcheck disable=SC1091
 . config/standby.env      # FD_USER, FD_NAME, CONFIGURE_STAGES (written by `fd-standby bundle`)
 
-PRIMARY_IP=""; PRIVATE_NET=""; CHECK_ONLY=0
+# Stages (run in this order by fd-standby, each in its own SSH call):
+#   --check-only   hardware/disk/network checks, changes nothing
+#   --firewall     load the firewall (SSH only from the primary) + 3 min automatic rollback,
+#                  which the caller cancels by touching /run/fd-standby-fw-ok from a NEW login
+#   --setup        everything else; refuses unless the firewall was confirmed
+PRIMARY_IP=""; EXTRA_SSH=""; MODE=""
 while [ $# -gt 0 ]; do case "$1" in
   --primary-ip) PRIMARY_IP=$2; shift 2;;
-  --private-net) PRIVATE_NET=$2; shift 2;;
-  --check-only) CHECK_ONLY=1; shift;;
+  --extra-ssh|--private-net) EXTRA_SSH=$2; shift 2;;
+  --check-only) MODE=check; shift;;
+  --firewall) MODE=firewall; shift;;
+  --setup) MODE=setup; shift;;
   *) echo "unknown arg $1"; exit 2;; esac; done
-[ -n "$PRIMARY_IP" ] || { echo "need --primary-ip"; exit 2; }
+[[ "$PRIMARY_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "need --primary-ip IPv4"; exit 2; }
+[[ -z "$EXTRA_SSH" || "$EXTRA_SSH" =~ ^[0-9./,\ ]+$ ]] || { echo "bad --extra-ssh (IPv4/CIDR list)"; exit 2; }
+[ -n "$MODE" ] || { echo "need --check-only, --firewall or --setup"; exit 2; }
 
 # Minimums (from the FireBAM v26.10.8 mainnet config: 164 GiB locked, 55 tiles on 48 threads)
 MIN_THREADS=48
@@ -68,8 +77,8 @@ for b in d:
     if b["type"]!="disk" or b.get("children"): continue           # partitioned / in use
     if b.get("fstype") or any(m for m in (b.get("mountpoints") or []) if m): continue
     if b["size"] < 200*10**9: continue
-    sig=subprocess.run(["wipefs","-n",b["path"]],capture_output=True,text=True).stdout.strip()
-    if sig: continue                                                # any signature = not empty
+    w=subprocess.run(["wipefs","-n",b["path"]],capture_output=True,text=True)
+    if w.returncode!=0 or w.stdout.strip(): continue                # error or any signature = not empty
     out.append({"path":b["path"],"size_gb":b["size"]//10**9,"model":(b.get("model") or "").strip(),"serial":b.get("serial"),"rota":b.get("rota")})
 out.sort(key=lambda x:-x["size_gb"])
 print(json.dumps(out))')
@@ -90,22 +99,28 @@ print(json.dumps(out))')
   fi
   log "layout: $LAYOUT accounts=${ACC_DEV:-rootfs} ledger=${LED_DEV:-${ACC_DEV:+same disk}}${LED_DEV:-${ACC_DEV:-rootfs}}"
 fi
-if [ "$CHECK_ONLY" = 1 ]; then
+if [ "$MODE" = check ]; then
   echo "RESULT {\"ok\":true,\"check_only\":true,\"layout\":\"$LAYOUT\",\"iface\":\"$IFACE\",\"threads\":$threads,\"ram_gib\":$ram_gib}"; exit 0
 fi
 
-# ------------------------------------------------------------------ 4. packages + user
 export DEBIAN_FRONTEND=noninteractive
 command -v nft >/dev/null && command -v mkfs.xfs >/dev/null || { apt-get -qq update; apt-get -qq install -y nftables xfsprogs >/dev/null; }
-id "$FD_USER" >/dev/null 2>&1 || useradd -r -m -d "/home/$FD_USER" -s /usr/sbin/nologin "$FD_USER"
 
-# ------------------------------------------------------------------ 5. firewall FIRST (SSH only from primary)
-sed -e "s#@PRIMARY_IP@#$PRIMARY_IP#" -e "s#@SSH_SOURCES@#$PRIMARY_IP${PRIVATE_NET:+, $PRIVATE_NET}#" standby.nft.in > /etc/nftables.conf
-nft -c -f /etc/nftables.conf
-# safety net: automatic rollback unless the caller confirms a new SSH login within 3 min
-nohup sh -c 'sleep 180; [ -e /run/fd-standby-fw-ok ] || nft flush ruleset' >/dev/null 2>&1 &
-nft -f /etc/nftables.conf; systemctl enable -q nftables
-log "firewall loaded (SSH from $PRIMARY_IP${PRIVATE_NET:+, $PRIVATE_NET}); confirm with: touch /run/fd-standby-fw-ok"
+# ------------------------------------------------------------------ 4. firewall (own stage)
+fw_active(){ nft list ruleset 2>/dev/null | grep -c 'fd-standby: SSH from primary only' >/dev/null; }
+if [ "$MODE" = firewall ]; then
+  rm -f /run/fd-standby-fw-ok
+  sed -e "s#@SSH_SOURCES@#$PRIMARY_IP${EXTRA_SSH:+, $EXTRA_SSH}#" standby.nft.in > /etc/nftables.conf
+  nft -c -f /etc/nftables.conf
+  nft list ruleset > /run/fd-standby-nft-prev 2>/dev/null || true
+  # safety net: restore the previous ruleset unless a NEW login confirms within 3 minutes
+  nohup sh -c 'sleep 180; [ -e /run/fd-standby-fw-ok ] || { nft flush ruleset; nft -f /run/fd-standby-nft-prev; }' >/dev/null 2>&1 &
+  nft -f /etc/nftables.conf; systemctl enable -q nftables
+  log "firewall loaded (SSH only from $PRIMARY_IP${EXTRA_SSH:+, $EXTRA_SSH}); waiting for confirmation"
+  echo "RESULT {\"ok\":true,\"stage\":\"firewall\"}"; exit 0
+fi
+[ -e /run/fd-standby-fw-ok ] && fw_active || fail "firewall not confirmed/active - run --firewall and confirm first"
+id "$FD_USER" >/dev/null 2>&1 || useradd -r -m -d "/home/$FD_USER" -s /usr/sbin/nologin "$FD_USER"
 
 # ------------------------------------------------------------------ 6. disks
 mkfs_label(){ local dev=$1 label=$2; blkid "$dev" >/dev/null 2>&1 && { echo "refusing: $dev has a signature"; exit 1; }; mkfs.xfs -q -L "$label" "$dev"; }

@@ -9,20 +9,30 @@ how the tooling prevents that, what it was tested against, and where the remaini
 1. **Both nodes always start unstaked.** The Firedancer config of the primary and of every standby
    points `[paths] identity_key` at a junk key. The staked identity is only ever applied at runtime
    with `firedancer set-identity`. A crash, reboot or restart therefore always comes back unstaked.
-2. **Switch order: old voter off, then new voter on.** `fd-standby-swap` switches the current voter
+2. **Act only on positive knowledge.** A node's identity is classified as *staked*, *junk* (its
+   own known junk public key), *other* or *unknown*. Unknown (SSH failure, CLI error, empty output)
+   never counts as "not staked": the script stops and alerts with the actual state instead.
+3. **Switch order: old voter off, then new voter on.** `fd-standby-swap` switches the current voter
    to its junk key first, verifies with `get-identity` that it no longer reports the staked key,
    and only then switches the other node to the staked key.
-3. **Re-check before every staked switch.** Immediately before running `set-identity <staked key>`
-   on one node, the script asks the other node (`get-identity`) and refuses if it reports the staked
-   identity.
-4. **Vote history travels with the identity.** The new voter is switched with
-   `--vote-history-file` containing the old voter's vote history, so it cannot vote on anything
-   the old voter has already voted on.
-5. **The staked keypair leaves the primary only for a swap** (`to-standby`), is verified on arrival
-   by public key, and is shredded on the standby by `to-primary`, by `down`, by the watchdog, and by
-   `fd-standby-swap shred-key`. The standby firewall only allows SSH from the primary.
-6. **Never delete a voting standby.** `down` and the watchdog refuse to delete a server whose
-   Firedancer reports the staked identity.
+4. **Re-check before every staked switch, verify after it.** Immediately before
+   `set-identity <staked key>` on one node, the other node must *positively* report its junk key.
+   After every switch the node must report the expected identity; otherwise the script restores
+   what it safely can and exits 3 with the actual state.
+5. **Vote history travels with the identity, and it must be fresh.** The new voter is switched
+   with `--vote-history-file` containing the `.bak` that the old voter wrote *during this switch*
+   (mtime check), so it cannot vote on anything the old voter already voted on.
+6. **The staked keypair leaves the primary only for a swap**, only after the standby firewall is
+   verified active, is stored on the standby in **tmpfs** (`/run/fd-standby`, never on disk), is
+   verified by public key, and is shredded (and the removal verified) by `to-primary`, by an EXIT
+   trap on any failed `to-standby`, by `down` and by `shred-key`.
+7. **Never delete a server that might vote.** `down` and the watchdog delete only if this primary
+   positively runs the staked identity, or the standby positively reports a non-staked identity.
+   Unknown = refuse and alert.
+8. **One operation at a time.** All mutating commands share a lock; the watchdog skips while it is
+   held; `qualify` refuses while a standby exists.
+9. **Retry only what changed nothing.** `fd-standby-swap` exits 2 for "refused, nothing changed"
+   (safe to retry) and 3 for "identities changed, swap incomplete" (never retried automatically).
 
 ## Lessons that are built in (each one was a real failure)
 
@@ -39,6 +49,13 @@ how the tooling prevents that, what it was tested against, and where the remaini
   Note: `replay_reset_slot` tracks the *finalized* slot, normally 5–20 slots behind the RPC tip.
 - **Commands in a `while read` loop must not read stdin** (`ssh` does). This silently skipped
   candidates. All loops read from a dedicated file descriptor and remote calls get `</dev/null`.
+- **Never move or delete Firedancer's vote-history files.** On every identity switch votor renames
+  its "spare" file (the `.bak` of the identity it last left) *by name*; if it is missing,
+  `renameat2` fails with `FD_LOG_ERR` and the validator dies. The tool only reads and copies them.
+- **The firewall must be confirmed right after it loads.** An earlier version started a 3-minute
+  "rollback unless confirmed" timer and only confirmed after the whole setup — on a slow setup the
+  rollback would have removed the firewall for good. Firewall is now its own stage, confirmed by a
+  new SSH login immediately, and verified again before the staked key is sent.
 - **Do not edit the scripts while a run is in progress** (bash reads scripts incrementally).
 
 ## What happens when things fail

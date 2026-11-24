@@ -92,12 +92,44 @@ PY
   say "bundle: $rel $(sha256sum "$real" | cut -c1-12) -> $BUNDLE_TGZ ($(du -h "$BUNDLE_TGZ" | cut -f1))"
 }
 
+# ------------------------------------------------------------------ server lifecycle helpers
+# delete a server and VERIFY it is gone; keeps the state file until then. Returns 1 + alert if not gone.
+destroy_verified(){ local prov=$1 id=$2 code
+  code=$("${prov}_destroy" "$id")
+  for _ in $(seq 1 18); do [ "$("${prov}_state" "$id")" = gone ] && { say "server $id deleted (http $code) and gone"; return 0; }; sleep 10; done
+  alert "server $prov $id still exists 3 min after delete (http $code) - CHECK THE PROVIDER, it may be billing"; return 1; }
+# a create call that failed may still have created a server: delete tagged servers younger than $1 that we do not know
+cleanup_orphans(){ local since=$1 prov id ip created known; known=$(state_get id)
+  while read -r prov id ip created <&3; do
+    [[ "$created" =~ ^[0-9]+$ ]] || continue
+    (( created >= since - 60 )) && [ "$id" != "$known" ] || continue
+    say "orphan from a failed create: $prov $id ($ip) -> deleting"; destroy_verified "$prov" "$id" </dev/null
+  done 3< <(list_tagged); }
+# identity of a standby: staked | junk | other | unknown (unknown = SSH/CLI failure, NEVER "not staked")
+standby_state(){ local ip=$1 id junk
+  id=$(s_id "$ip" </dev/null 2>/dev/null); junk=$(keypub_remote "$ip" "$S_JUNK_KEY" </dev/null 2>/dev/null)
+  if ! [[ "$id" =~ ^$B58$ ]]; then echo unknown; elif [ "$id" = "$STAKED_PUBKEY" ]; then echo staked
+  elif [ "$id" = "$junk" ]; then echo junk; else echo other; fi; }
+# a standby may be deleted only if we KNOW it does not vote: it reports a non-staked identity,
+# or THIS primary positively runs the staked identity (then the standby cannot be the voter)
+safe_to_delete(){ local ip=$1 st
+  [ "$(p_id)" = "$STAKED_PUBKEY" ] && return 0
+  valid_ip "$ip" || return 1
+  st=$(standby_state "$ip"); [ "$st" = junk ] || [ "$st" = other ]; }
+
 # ------------------------------------------------------------------ up / down
 up(){
-  if [ -s "$FDS_STATE" ] && [ "$("$(state_get provider)_state" "$(state_get id)" | cut -d' ' -f1)" != gone ]; then
-    say "standby already exists: $(state_get provider) $(state_get id) $(state_get ip)"; state_get ip; return 0; fi
+  if [ -s "$FDS_STATE" ]; then
+    local sp sid sst; sp=$(state_get provider); sid=$(state_get id)
+    sst=$("${sp}_state" "$sid" | cut -d' ' -f1)
+    if [ "$sst" != gone ]; then
+      valid_ip "$(state_get ip)" || die "an unfinished standby exists ($sp $sid, no IP yet) - wait or run: fd-standby down"
+      say "standby already exists: $sp $sid $(state_get ip)"; state_get ip; return 0; fi
+    rm -f "$FDS_STATE"
+  fi
   bundle
-  local cands prov plan region price id t0 s ip=""
+  local cands prov plan region price id t0 s ip="" tc pip
+  pip=$(primary_ip); valid_ip "$pip" || die "cannot determine this primary's public IP"
   if [ -n "${PLAN:-}" ]; then cands=$(ANY=1 stock_lines | awk -v p="$PLAN" -v r="${REGION:-}" '$2==p && (r=="" || $3==r)')
   else cands=$(stock_lines); fi
   [ -n "$cands" ] || die "no qualified candidate in stock under $MAX_PRICE_PER_HOUR/h (try later, or: fd-standby stock --any)"
@@ -105,30 +137,33 @@ up(){
   # fd 3: commands inside the loop (ssh!) must not consume the candidate list on stdin
   while read -r prov plan region price <&3; do
     say "creating $prov $plan in $region (~$price/h)"
+    tc=$(date +%s)
     id=$("${prov}_create" "$plan" "$region" "fd-standby-$(date -u +%m%d%H%M)" </dev/null)
-    [ -n "$id" ] || { say "create failed, next candidate"; continue; }
+    if [ -z "$id" ]; then say "create failed, next candidate"; sleep 20; cleanup_orphans "$tc"; continue; fi
     t0=$(date +%s); ip=""; state_put "$prov" "$id" - "$plan" "$region" "$t0"
     say "created $prov server $id; waiting for delivery"
     while :; do
-      s=$("${prov}_state" "$id"); case "$s" in ready*) ip=${s#ready }; break;; gone) say "server $id vanished"; break;; esac
-      if (( $(date +%s)-t0 > DELIVERY_MAX_S )); then
-        say "server $id not delivered within $((DELIVERY_MAX_S/60)) min -> deleting (http $("${prov}_destroy" "$id")), next candidate"; break; fi
+      s=$("${prov}_state" "$id" </dev/null); case "$s" in ready*) ip=${s#ready }; break;; gone) say "server $id vanished"; break;; esac
+      if (( $(date +%s)-t0 > DELIVERY_MAX_S )); then say "server $id not delivered within $((DELIVERY_MAX_S/60)) min -> deleting, next candidate"; break; fi
       sleep 20
     done
-    [ -n "$ip" ] || { rm -f "$FDS_STATE"; continue; }
+    if ! valid_ip "$ip"; then destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"; continue; fi
     state_put "$prov" "$id" "$ip" "$plan" "$region" "$t0"
     for _ in $(seq 1 60); do sshs "$ip" true </dev/null 2>/dev/null && break; sleep 10; done
     say "delivered in $(( ($(date +%s)-t0)/60 )) min: $ip"
-    sshs "$ip" "rm -rf /root/fd-standby-bundle && mkdir -p /root/fd-standby-bundle && tar -C /root/fd-standby-bundle -xzf -" < "$BUNDLE_TGZ" || die "bundle upload failed"
-    if ! sshs "$ip" "/root/fd-standby-bundle/standby-init.sh --primary-ip $(primary_ip) --check-only" </dev/null 2>&1 | tee -a "$FDS_LOG" | grep '^RESULT {"ok":true' >/dev/null; then
-      say "hardware check failed on $plan -> deleting (http $("${prov}_destroy" "$id")), next candidate"; rm -f "$FDS_STATE"; continue; fi
-    sshs "$ip" "/root/fd-standby-bundle/standby-init.sh --primary-ip $(primary_ip) ${STANDBY_EXTRA_SSH_SOURCES:+--private-net $STANDBY_EXTRA_SSH_SOURCES}" </dev/null 2>&1 | tee -a "$FDS_LOG" | grep -E '^\[|^RESULT' >&2
-    # firewall is live: a NEW ssh login must work, then the automatic firewall rollback is cancelled
-    sshs "$ip" "touch /run/fd-standby-fw-ok" </dev/null || die "cannot SSH after firewall (auto-rollback in 3 min reopens it); server $id left running"
-    sshs "$ip" "systemctl is-active --quiet firedancer" </dev/null || die "firedancer not running on standby $ip"
+    if ! sshs "$ip" "rm -rf /root/fd-standby-bundle && mkdir -p /root/fd-standby-bundle && tar -C /root/fd-standby-bundle -xzf -" < "$BUNDLE_TGZ"; then
+      say "bundle upload failed -> deleting, next candidate"; destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"; continue; fi
+    init(){ sshs "$ip" "/root/fd-standby-bundle/standby-init.sh --primary-ip $pip ${STANDBY_EXTRA_SSH_SOURCES:+--extra-ssh $(printf %q "$STANDBY_EXTRA_SSH_SOURCES")} $1" </dev/null 2>&1 | tee -a "$FDS_LOG"; }
+    if ! init --check-only | grep '^RESULT {"ok":true' >/dev/null; then
+      say "hardware check failed on $plan -> deleting, next candidate"; destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"; continue; fi
+    # firewall FIRST, then confirm it with a NEW login right away (the box rolls it back after 3 min otherwise)
+    init --firewall | grep -E '^\[|^RESULT' >&2
+    sshs "$ip" "touch /run/fd-standby-fw-ok" </dev/null || die "cannot SSH after loading the firewall (it rolls back in 3 min); server $prov $id left for inspection"
+    init --setup | grep -E '^\[|^RESULT' | tee /dev/stderr | grep '^RESULT {"ok":true' >/dev/null \
+      || die "standby setup failed on $ip (left for inspection: fd-standby down)"
     say "waiting for the standby to catch up"
     local w=0
-    until sshs "$ip" "grep -q 'caught up to cluster' $S_LOG" </dev/null 2>/dev/null; do
+    until sshs "$ip" "grep 'caught up to cluster' $S_LOG >/dev/null" </dev/null 2>/dev/null; do
       sleep 15; w=$((w+15)); ((w>CATCHUP_MAX_S)) && die "standby $ip did not catch up in $((CATCHUP_MAX_S/60)) min (left running: fd-standby down)"; done
     sshs "$ip" "grep -h 'caught up to cluster' $S_LOG | tail -1" </dev/null | sed 's/.*\]: /  /' >&2
     say "standby ready: $prov $plan $region $ip (total $(( ($(date +%s)-t0)/60 )) min)"
@@ -139,51 +174,55 @@ up(){
 
 down(){
   [ -s "$FDS_STATE" ] || { say "no standby in state file"; return 0; }
-  local prov id ip sid; prov=$(state_get provider); id=$(state_get id); ip=$(state_get ip)
-  if [ "$ip" != - ] && sshs "$ip" true 2>/dev/null; then
-    sid=$(s_id "$ip")
-    [ "$sid" != "$STAKED_PUBKEY" ] || [ "${FORCE:-0}" = 1 ] || die "standby $ip RUNS THE STAKED IDENTITY - run: fd-standby-swap to-primary $ip"
-    sshs "$ip" "shred -u $S_STAKED_KEY 2>/dev/null; true"
-  fi
-  say "deleting $prov server $id ($ip): http $("${prov}_destroy" "$id")"
-  for _ in $(seq 1 12); do [ "$("${prov}_state" "$id")" = gone ] && break; sleep 10; done
-  [ "$("${prov}_state" "$id")" = gone ] || die "server $id still exists after delete - CHECK THE PROVIDER (billing!)"
-  say "server $id is gone (ran $(( ($(date +%s)-$(state_get created))/60 )) min)"; rm -f "$FDS_STATE"
+  local prov id ip; prov=$(state_get provider); id=$(state_get id); ip=$(state_get ip)
+  if ! safe_to_delete "$ip"; then
+    [ "${FORCE:-0}" = 1 ] || die "standby $ip may hold the staked identity (state: $(standby_state "$ip")) and this primary is not staked - refusing. Fix first (fd-standby-swap status $ip), or --force"
+    alert "FORCED delete of standby $ip in state $(standby_state "$ip")"; fi
+  if valid_ip "$ip"; then sshs "$ip" "shred -u /run/fd-standby/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || say "note: could not verify key removal on $ip (it is in tmpfs and dies with the server)"; fi
+  destroy_verified "$prov" "$id" || die "server $id not confirmed gone (state file kept)"
+  say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$FDS_STATE"
 }
 
 list_tagged(){ local p; for p in $PROVIDERS; do "${p}_enabled" && "${p}_list_tagged"; done; }
 
 status(){
-  if [ -s "$FDS_STATE" ]; then cat "$FDS_STATE"; echo; "$SWAP" status "$(state_get ip)"; else echo "no standby"; fi
+  if [ -s "$FDS_STATE" ]; then cat "$FDS_STATE"; echo; valid_ip "$(state_get ip)" && "$SWAP" status "$(state_get ip)"; else echo "no standby"; fi
   echo "tagged servers at providers:"; list_tagged | sed 's/^/  /'
 }
 
 # ------------------------------------------------------------------ maintain
-wait_primary_caught_up(){  # since epoch $1
-  local since; since=$(date -u -d "@$1" '+%F %T')
+wait_primary_caught_up(){  # since epoch $1, standby IP $2 (must keep voting meanwhile)
+  local since; since=$(date -u -d "@$1" '+%F %T'); local warned=0
   for _ in $(seq 1 $((CATCHUP_MAX_S/15))); do
+    if [ "$(standby_state "$2")" != staked ] && ((warned==0)); then
+      alert "standby $2 no longer reports the staked identity during maintenance ($(standby_state "$2")) - CHECK: maybe nobody votes"; warned=1; fi
     systemctl is-active --quiet "$FD_UNIT" && awk -v s="$since" '$2" "substr($3,1,8)>=s' "$P_LOG" | grep 'caught up to cluster' >/dev/null && return 0
     sleep 15; done; return 1
 }
+# run fd-standby-swap; retry ONLY while it reports "refused, nothing changed" (exit 2)
+swap_retry(){ local n=$1 rc; shift
+  for _ in $(seq 1 "$n"); do "$SWAP" "$@" --yes --verify=30 </dev/null; rc=$?; [ $rc = 2 ] || return $rc; sleep 20; done; return 2; }
 maintain(){
   local cmd=("$@"); [ ${#cmd[@]} -gt 0 ] || cmd=(systemctl restart "$FD_UNIT")
   say "MAINTAIN: primary command: ${cmd[*]}"
   [ "$(p_id)" = "$STAKED_PUBKEY" ] || die "primary is not running the staked identity - nothing to protect"
   [ "${YES:-0}" = 1 ] || { read -r -p "  >>> rent a standby, move the STAKED identity to it, run the command here, move back? [yes/NO] " a </dev/tty; [ "$a" = yes ] || die "not confirmed"; }
-  local ip; ip=$(up) || exit 1
-  "$SWAP" rehearse "$ip" </dev/null >/dev/null 2>&1 || die "rehearsal on standby failed (standby left running: fd-standby down)"
-  local ok=0; for _ in 1 2 3 4 5 6; do "$SWAP" to-standby "$ip" --yes --verify=30 </dev/null && { ok=1; break; }; sleep 20; done
-  if ((!ok)); then
-    [ "$(p_id)" = "$STAKED_PUBKEY" ] && { say "swap not done, primary still staked -> deleting standby"; down; }
-    die "swap to standby failed"; fi
+  local ip rc; ip=$(up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
+  "$SWAP" rehearse "$ip" </dev/null >/dev/null 2>&1 || { down; die "rehearsal on standby failed (standby deleted)"; }
+  swap_retry 6 to-standby "$ip"; rc=$?
+  case $rc in
+    0) ;;
+    2) down; die "swap to standby refused repeatedly - nothing changed, standby deleted";;
+    *) die "swap to standby INCOMPLETE (see alert for the actual state) - nothing deleted, check manually";;
+  esac
   local t pid0; t=$(date +%s); pid0=$(systemctl show -p MainPID --value "$FD_UNIT")
   say "running on primary: ${cmd[*]}"
-  "${cmd[@]}" </dev/null || { alert "maintenance command failed - STANDBY $ip IS VOTING, left running"; die "maintenance command failed; staked identity stays on standby $ip"; }
+  "${cmd[@]}" </dev/null || die "maintenance command failed; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
   if [ "$(systemctl show -p MainPID --value "$FD_UNIT")" = "$pid0" ]; then say "Firedancer was not restarted by the command - no catch-up wait"
-  else wait_primary_caught_up "$t" || { alert "primary not caught up after maintenance - STANDBY $ip IS VOTING"; die "primary did not catch up; staked identity stays on standby $ip"; }
+  else wait_primary_caught_up "$t" "$ip" || die "primary did not catch up; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
     say "primary caught up after $(( ($(date +%s)-t)/60 )) min"; fi
-  ok=0; for _ in $(seq 1 10); do "$SWAP" to-primary "$ip" --yes --verify=30 </dev/null && { ok=1; break; }; sleep 20; done
-  ((ok)) || { alert "swap back failed - STANDBY $ip IS VOTING"; die "swap back to primary failed; standby left running"; }
+  swap_retry 10 to-primary "$ip"; rc=$?
+  [ $rc = 0 ] || die "swap back to primary failed (rc $rc); standby $ip left running (voting: $(standby_state "$ip"))"
   down
   say "MAINTAIN done"
 }
@@ -191,12 +230,14 @@ maintain(){
 # ------------------------------------------------------------------ qualify
 qualify(){
   local prov=$1 plan=$2 region=$3 ip t cold
+  [ -s "$FDS_STATE" ] && die "a standby exists (state file) - qualify only runs when no standby is in use"
+  [[ "$prov $plan $region" =~ ^[a-z]+\ [A-Za-z0-9._-]+\ [A-Za-z0-9._-]+$ ]] || die "bad provider/plan/region"
   grep -qE "^$prov +$plan +$region " "$CANDIDATES_FILE" || echo "$prov $plan $region no" >> "$CANDIDATES_FILE"
   say "QUALIFY $prov $plan $region (throwaway keys only)"
-  ip=$(PLAN=$plan REGION=$region up) || exit 1
+  ip=$(PLAN=$plan REGION=$region up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
   [ "$(state_get plan)" = "$plan" ] || { down; die "got a different plan"; }
   "$SWAP" rehearse "$ip" </dev/null || { down; die "rehearsal failed"; }
-  t=$(date +%s); sshs "$ip" "rm -f $S_BASE/snapshots/*; systemctl restart firedancer" </dev/null
+  t=$(date +%s); sshs "$ip" "rm -f $(printf %q "$S_BASE")/snapshots/*; systemctl restart firedancer" </dev/null
   sleep 60
   for _ in $(seq 1 $((CATCHUP_MAX_S/15))); do
     sshs "$ip" "awk -v s=\"$(date -u -d "@$t" '+%F %T')\" '\$2\" \"substr(\$3,1,8)>=s' $S_LOG | grep 'caught up to cluster' >/dev/null" </dev/null && break; sleep 15; done
@@ -211,7 +252,7 @@ qualify(){
 }
 qualify_queue(){
   local max=${MAX_N:-99} n=0 done_plans prov plan region price
-  done_plans=" $(awk '$4=="yes"{print $1":"$2}' "$CANDIDATES_FILE" | sort -u | tr '\n' ' ') "
+  done_plans=" $(awk '$4=="yes"||$4=="off"{print $1":"$2}' "$CANDIDATES_FILE" | sort -u | tr '\n' ' ') "
   while read -r prov plan region price <&3; do
     case "$done_plans" in *" $prov:$plan "*) continue;; esac
     ((n>=max)) && break
@@ -223,41 +264,46 @@ qualify_queue(){
 
 # ------------------------------------------------------------------ watchdog
 watchdog(){
-  local now prov id ip created age sid; now=$(date +%s)
+  local now prov id ip created age st; now=$(date +%s)
   while read -r prov id ip created <&3; do
+    [[ "$created" =~ ^[0-9]+$ ]] || { alert "watchdog: cannot read age of $prov $id"; continue; }
     age=$(( (now-created)/3600 ))
     (( age >= WATCHDOG_ALERT_AFTER_H )) && alert "standby $prov $id ($ip) running ${age} h"
     (( age < WATCHDOG_DELETE_AFTER_H )) && continue
-    sid=$(s_id "$ip" </dev/null 2>/dev/null)
-    if [ "$sid" = "$STAKED_PUBKEY" ]; then alert "standby $prov $id ($ip) is VOTING for ${age} h - not deleting"; continue; fi
-    sshs "$ip" "shred -u $S_STAKED_KEY 2>/dev/null" </dev/null 2>/dev/null
-    alert "watchdog deleted forgotten standby $prov $id ($ip) after ${age} h: http $("${prov}_destroy" "$id")"
-    [ "$(state_get id)" = "$id" ] && rm -f "$FDS_STATE"
+    if ! safe_to_delete "$ip"; then
+      st=$(valid_ip "$ip" && standby_state "$ip" || echo unknown)
+      alert "standby $prov $id ($ip) is ${age} h old, state $st, NOT deleting (it may be voting)"; continue; fi
+    alert "watchdog deleting forgotten standby $prov $id ($ip) after ${age} h"
+    destroy_verified "$prov" "$id" </dev/null && { [ "$(state_get id)" = "$id" ] && rm -f "$FDS_STATE"; }
   done 3< <(list_tagged)
 }
 
-# ------------------------------------------------------------------ doctor
+# ------------------------------------------------------------------ doctor (changes nothing)
 doctor(){
   local bad=0 p
-  chk(){ if eval "$2" >/dev/null 2>&1; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; bad=1; fi; }
+  chk(){ local d=$1; shift; if "$@" >/dev/null 2>&1; then printf '  ok   %s\n' "$d"; else printf '  FAIL %s\n' "$d"; bad=1; fi; }
+  not_staked(){ [ "$(keypub_local "$1")" != "$STAKED_PUBKEY" ]; }
+  staked_ok(){ [ "$(stat -c '%U %a' "$1")" = 'root 600' ] && [ "$(keypub_local "$1")" = "$STAKED_PUBKEY" ]; }
+  metrics_ok(){ [ -n "$(p_metrics | metric replay_reset_slot)" ]; }
   echo "config: $FDS_CONF"
-  chk "primary Firedancer config parses ($PRIMARY_FD_CONFIG)" "[ -n \"$P_NAME\" ]"
-  chk "Firedancer binary runs ($FD_BIN)" "'$FD_BIN' --version"
-  chk "primary junk key exists ($P_JUNK_KEY)" "[ -s '$P_JUNK_KEY' ]"
-  chk "primary junk key is NOT the staked key" "[ \"\$(keypub_local '$P_JUNK_KEY')\" != '$STAKED_PUBKEY' ]"
-  chk "staked key present, root 0600, matches STAKED_PUBKEY" "[ \"\$(stat -c '%U %a' '$PRIMARY_STAKED_KEY')\" = 'root 600' ] && [ \"\$(keypub_local '$PRIMARY_STAKED_KEY')\" = '$STAKED_PUBKEY' ]"
-  chk "Firedancer running ($FD_UNIT)" "systemctl is-active --quiet '$FD_UNIT'"
+  chk "primary Firedancer config parses ($PRIMARY_FD_CONFIG)" test -n "$P_NAME"
+  chk "Firedancer binary runs ($FD_BIN)" "$FD_BIN" --version
+  chk "primary junk key exists ($P_JUNK_KEY)" test -s "$P_JUNK_KEY"
+  chk "primary junk key is NOT the staked key" not_staked "$P_JUNK_KEY"
+  chk "staked key present, root 0600, matches STAKED_PUBKEY" staked_ok "$PRIMARY_STAKED_KEY"
+  chk "Firedancer running ($FD_UNIT)" systemctl is-active --quiet "$FD_UNIT"
   echo "  info running identity: $(p_id)  (staked: $STAKED_PUBKEY)"
-  chk "metrics endpoint answers (port $P_METRICS_PORT)" "p_metrics | grep replay_reset_slot >/dev/null"
-  chk "vote history dir exists ($P_VH_DIR)" "[ -d '$P_VH_DIR' ]"
-  chk "log file readable ($P_LOG)" "[ -r '$P_LOG' ]"
-  chk "SSH key for standbys ($SSH_KEY)" "[ -s '$SSH_KEY' ] && [ -s '$SSH_KEY.pub' ]"
-  chk "candidates file ($CANDIDATES_FILE)" "[ -s '$CANDIDATES_FILE' ]"
-  chk "public RPC reachable" "cluster_slot"
-  chk "python3 >= 3.11 (tomllib)" "python3 -c 'import tomllib'"
+  chk "metrics endpoint answers (port $P_METRICS_PORT)" metrics_ok
+  chk "vote history dir exists ($P_VH_DIR)" test -d "$P_VH_DIR"
+  chk "log file readable ($P_LOG)" test -r "$P_LOG"
+  chk "SSH key for standbys ($SSH_KEY)" test -s "$SSH_KEY.pub"
+  chk "candidates file ($CANDIDATES_FILE)" test -s "$CANDIDATES_FILE"
+  chk "public RPC reachable" cluster_slot
+  chk "this primary's public IP detectable" valid_ip "$(primary_ip)"
   for p in $PROVIDERS; do
     if "${p}_enabled"; then chk "$p API configured and answering" "${p}_list_tagged"; else echo "  --   $p not configured"; fi
   done
+  [ -s "$FDS_STATE" ] && echo "  info a standby is recorded in $FDS_STATE: $(cat "$FDS_STATE")"
   echo "  info qualified candidates in stock now:"; stock_lines | sed 's/^/         /'
   return $bad
 }
@@ -270,8 +316,13 @@ while [ $# -gt 0 ]; do case "$1" in
 export ANY PLAN REGION
 case "$CMD" in
   ""|-h|--help|help) sed -n 2,19p "$0"; exit 0 ;;
+  watchdog) [ -r "$FDS_CONF" ] || exit 0 ;;            # timer before configuration: nothing to do
 esac
 fds_load_config
+case "$CMD" in
+  up|down|maintain|qualify|qualify-queue|bundle) fds_lock_or_exit ;;
+  watchdog) [ "${FDS_LOCK_HELD:-0}" = 1 ] || { exec 9>"$FDS_STATE_DIR/lock"; flock -n 9 || exit 0; export FDS_LOCK_HELD=1; } ;;
+esac
 case "$CMD" in
   doctor) doctor ;;
   stock) stock_lines ;;

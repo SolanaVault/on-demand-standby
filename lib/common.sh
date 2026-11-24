@@ -14,7 +14,7 @@ S_FD_BIN=/opt/firedancer/bin/firedancer
 S_FD_CFG=/etc/firedancer/standby.toml
 S_ACC_MNT=/mnt/fd-accounts
 S_LED_MNT=/mnt/fd-ledger
-S_STAKED_KEY=/etc/firedancer/keys/staked-identity.json
+S_STAKED_KEY=/run/fd-standby/staked-identity.json   # tmpfs only: gone on reboot, never on disk
 
 fds_load_config(){
   [ -r "$FDS_CONF" ] || { echo "missing $FDS_CONF (see config/fd-standby.conf.example)" >&2; exit 2; }
@@ -31,7 +31,21 @@ fds_load_config(){
   ALERT_CMD=${ALERT_CMD:-logger -t fd-standby}
   STANDBY_CONFIGURE_STAGES=${STANDBY_CONFIGURE_STAGES:-hugetlbfs sysctl irq-affinity irq-balance kworkers cpuset console snapshots}
   mkdir -p "$FDS_STATE_DIR"; chmod 700 "$FDS_STATE_DIR"
+  [[ "$STAKED_PUBKEY" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || { echo "STAKED_PUBKEY is not a base58 pubkey" >&2; exit 2; }
+  [[ "$SWAP_MAX_LAG" =~ ^[0-9]+$ && "$DELIVERY_MAX_S" =~ ^[0-9]+$ && "$CATCHUP_MAX_S" =~ ^[0-9]+$ ]] || { echo "numeric settings must be integers" >&2; exit 2; }
   fds_primary_info
+  [[ "$P_NAME" =~ ^[A-Za-z0-9_.-]+$ && "${P_USER:-firedancer}" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "unsupported Firedancer name/user in $PRIMARY_FD_CONFIG" >&2; exit 2; }
+}
+
+valid_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+
+# One mutating fd-standby operation at a time (maintain, up, down, qualify, swap, watchdog).
+# fd-standby takes the lock and exports FDS_LOCK_HELD for the fd-standby-swap it calls.
+fds_lock_or_exit(){
+  [ "${FDS_LOCK_HELD:-0}" = 1 ] && return 0
+  exec 9>"$FDS_STATE_DIR/lock"
+  flock -n 9 || { echo "another fd-standby operation is running (lock $FDS_STATE_DIR/lock)" >&2; exit 75; }
+  export FDS_LOCK_HELD=1
 }
 
 say(){ printf '[%s] %s\n' "$(date -u +%T)" "$*" | tee -a "$FDS_LOG" >&2; }

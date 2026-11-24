@@ -127,6 +127,12 @@ config, which the standby inherits) and raise the TCP receive window
 1.26–2.31 €/h for qualified types; a maintenance run uses one hour. `MAX_PRICE_PER_HOUR` caps
 what may be rented. A forgotten server is deleted by the watchdog after 6 h (if unstaked).
 
+## Privacy note
+
+The standby runs a config derived from your primary's Firedancer config. Anything in that file
+(RPC or snapshot URLs with tokens, BAM/relayer settings) is copied to the rented server for the
+duration of the run. Keep secrets out of the Firedancer TOML.
+
 ## Not covered
 
 - **Unplanned crashes.** Renting and syncing a standby takes ~20 minutes; a crashed primary
