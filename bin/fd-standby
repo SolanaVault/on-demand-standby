@@ -185,7 +185,7 @@ down(){
   say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$FDS_STATE"
 }
 
-list_tagged(){ local p; for p in $PROVIDERS; do "${p}_enabled" && "${p}_list_tagged"; done; }
+list_tagged(){ local p rc=0; for p in $PROVIDERS; do "${p}_enabled" || continue; "${p}_list_tagged" || rc=1; done; return $rc; }
 
 status(){
   if [ -s "$FDS_STATE" ]; then cat "$FDS_STATE"; echo; valid_ip "$(state_get ip)" && "$SWAP" status "$(state_get ip)"; else echo "no standby"; fi
@@ -274,6 +274,7 @@ watchdog(){
   if [ -s "$FDS_STATE" ] && valid_ip "$(state_get ip)" && [ "$(p_id)" != "$STAKED_PUBKEY" ] && [ "$(standby_state "$(state_get ip)")" != staked ]; then
     alert "watchdog: NEITHER the primary nor standby $(state_get ip) reports the staked identity"; fi
   while read -r prov id ip created <&3; do
+    [ -n "$prov" ] || continue
     [[ "$created" =~ ^[0-9]+$ ]] || { alert "watchdog: cannot read age of $prov $id"; continue; }
     age=$(( (now-created)/3600 ))
     (( age >= WATCHDOG_ALERT_AFTER_H )) && alert "standby $prov $id ($ip) running ${age} h"
