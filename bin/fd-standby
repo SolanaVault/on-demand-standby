@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fd-standby: rent an hourly bare-metal server, turn it into a caught-up Firedancer standby,
-# move the staked identity there while THIS primary is maintained, move it back, delete it.
+# move the staked identity there (failover); later move it back and delete the server (failback).
 #
 #   fd-standby doctor                      check config, keys, APIs, primary; changes nothing
 #   fd-standby stock [--any]               in-stock candidates, cheapest first (--any: unqualified too)
@@ -8,8 +8,9 @@
 #   fd-standby up [--plan P [--region R]]  rent + set up + wait until caught up (prints the IP)
 #   fd-standby status                      current standby, identities, tagged servers
 #   fd-standby down [--force]              shred any staked key on the standby, delete it, verify
-#   fd-standby maintain [--yes] [-- CMD..] up -> swap -> CMD here (default: restart Firedancer)
-#                                          -> wait until caught up -> swap back -> down
+#   fd-standby failover [--yes]            up -> rehearse -> move the staked identity to the standby
+#   fd-standby failback [--wait]           primary ready (junk key, caught up) -> move the identity back
+#                                          -> shred the key copy -> delete the standby
 #   fd-standby qualify PROVIDER PLAN REGION   prove a server type end to end (throwaway keys only)
 #   fd-standby qualify-queue [--max N]     qualify every unqualified in-stock type (N per run)
 #   fd-standby watchdog                    (timer) alert on / delete forgotten standbys
@@ -197,44 +198,51 @@ status(){
   echo "tagged servers at providers:"; list_tagged | sed 's/^/  /'
 }
 
-# ------------------------------------------------------------------ maintain
-wait_primary_caught_up(){  # since epoch $1, standby IP $2 (must keep voting meanwhile)
-  local since st last=staked; since=$(date -u -d "@$1" '+%F %T')
-  for _ in $(seq 1 $((CATCHUP_MAX_S/15))); do
-    st=$(standby_state "$2"); [ "$st" = unknown ] && { sleep 3; st=$(standby_state "$2"); }
-    if [ "$st" != "$last" ]; then
-      [ "$st" = staked ] && say "standby $2 reports the staked identity again" \
-        || alert "standby $2 now reports '$st' during maintenance (was '$last') - CHECK: maybe nobody votes"
-      last=$st; fi
-    systemctl is-active --quiet "$FD_UNIT" && awk -v s="$since" '$2" "substr($3,1,8)>=s' "$P_LOG" | grep 'caught up to cluster' >/dev/null && return 0
-    sleep 15; done; return 1
-}
+# ------------------------------------------------------------------ failover / failback
 # run fd-standby-swap; retry ONLY while it reports "refused, nothing changed" (exit 20)
 swap_retry(){ local n=$1 rc; shift
   for _ in $(seq 1 "$n"); do "$SWAP" "$@" --yes --verify=30 </dev/null; rc=$?; [ $rc = 20 ] || return $rc; sleep 20; done; return 20; }
-maintain(){
-  local cmd=("$@"); [ ${#cmd[@]} -gt 0 ] || cmd=(systemctl restart "$FD_UNIT")
-  say "MAINTAIN: primary command: ${cmd[*]}"
-  [ "$(p_id)" = "$STAKED_PUBKEY" ] || die "primary is not running the staked identity - nothing to protect"
-  [ "${YES:-0}" = 1 ] || { read -r -p "  >>> rent a standby, move the STAKED identity to it, run the command here, move back? [yes/NO] " a </dev/tty; [ "$a" = yes ] || die "not confirmed"; }
+
+failover(){
+  say "FAILOVER: rent a standby and move the staked identity to it"
+  [ "$(p_id)" = "$STAKED_PUBKEY" ] || die "this primary is not running the staked identity - nothing to fail over"
+  [ -s "$FDS_STATE" ] && die "a standby is already recorded ($(state_get ip)) - check: fd-standby status"
+  [ "${YES:-0}" = 1 ] || { read -r -p "  >>> rent a standby and move the STAKED identity to it? [yes/NO] " a </dev/tty; [ "$a" = yes ] || die "not confirmed"; }
   local ip rc; ip=$(up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
   "$SWAP" rehearse "$ip" </dev/null >/dev/null 2>&1 || { down; die "rehearsal on standby failed (standby deleted)"; }
   swap_retry 6 to-standby "$ip"; rc=$?
   case $rc in
     0) ;;
     20) down; die "swap to standby refused repeatedly - nothing changed, standby deleted";;
-    *) die "swap to standby INCOMPLETE (see alert for the actual state) - nothing deleted, check manually";;
+    *) die "swap to standby INCOMPLETE (see alert for the actual state) - nothing deleted, check: fd-standby status";;
   esac
-  local t pid0; t=$(date +%s); pid0=$(systemctl show -p MainPID --value "$FD_UNIT")
-  say "running on primary: ${cmd[*]}"
-  env -u FDS_LOCK_HELD "${cmd[@]}" </dev/null 9>&- || die "maintenance command failed; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
-  if [ "$(systemctl show -p MainPID --value "$FD_UNIT")" = "$pid0" ]; then say "Firedancer was not restarted by the command - no catch-up wait"
-  else wait_primary_caught_up "$t" "$ip" || die "primary did not catch up; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
-    say "primary caught up after $(( ($(date +%s)-t)/60 )) min"; fi
+  say "FAILED OVER: standby $ip ($(state_get provider) $(state_get plan), ~$(state_get region)) votes with $STAKED_PUBKEY."
+  say "Do your work on this primary now. Its Firedancer must come back on its JUNK identity and catch up; then run: fd-standby failback"
+}
+
+primary_ready(){  # prints the reason when not ready
+  local id lag; id=$(p_id)
+  [ -n "$id" ] || { echo "Firedancer on this primary does not answer get-identity"; return 1; }
+  [ "$id" = "$(keypub_local "$P_JUNK_KEY")" ] || { echo "primary runs $id, not its junk key"; return 1; }
+  lag=$(lag_of "$(p_metrics | metric replay_reset_slot | cut -d. -f1)")
+  [ "$lag" -le "$SWAP_MAX_LAG" ] || { echo "primary not caught up (lag $lag)"; return 1; }
+}
+failback(){
+  [ -s "$FDS_STATE" ] && valid_ip "$(state_get ip)" || die "no standby recorded - nothing to fail back from"
+  local ip rc why waited=0; ip=$(state_get ip)
+  say "FAILBACK: move the staked identity from standby $ip back to this primary, then delete the standby"
+  [ "$(standby_state "$ip")" = staked ] || die "standby $ip is not running the staked identity ($(standby_state "$ip")) - check: fd-standby status"
+  until why=$(primary_ready); do
+    [ "${WAIT:-0}" = 1 ] || die "primary not ready: $why (fix it, or use --wait to wait up to $((CATCHUP_MAX_S/60)) min)"
+    ((waited==0)) && say "waiting for the primary: $why"
+    [ "$(standby_state "$ip")" = staked ] || alert "standby $ip no longer reports the staked identity while waiting - CHECK: maybe nobody votes"
+    sleep 15; waited=$((waited+15)); ((waited>CATCHUP_MAX_S)) && die "primary still not ready after $((CATCHUP_MAX_S/60)) min: $why (standby keeps voting)"
+  done
+  say "primary ready"
   swap_retry 10 to-primary "$ip"; rc=$?
-  [ $rc = 0 ] || die "swap back to primary failed (rc $rc); standby $ip left running (voting: $(standby_state "$ip"))"
+  [ $rc = 0 ] || die "failback failed (rc $rc); standby $ip left running (state: $(standby_state "$ip")) - check: fd-standby status"
   down
-  say "MAINTAIN done"
+  say "FAILBACK done: this primary votes again, standby deleted"
 }
 
 # ------------------------------------------------------------------ qualify
@@ -305,7 +313,7 @@ doctor(){
   chk "primary junk key exists ($P_JUNK_KEY)" test -s "$P_JUNK_KEY"
   chk "primary junk key is NOT the staked key" not_staked "$P_JUNK_KEY"
   chk "staked key present, root 0600, matches STAKED_PUBKEY" staked_ok "$PRIMARY_STAKED_KEY"
-  chk "Firedancer running ($FD_UNIT)" systemctl is-active --quiet "$FD_UNIT"
+  chk "Firedancer on this primary answers get-identity" test -n "$(p_id)"
   echo "  info running identity: $(p_id)  (staked: $STAKED_PUBKEY)"
   chk "metrics endpoint answers (port $P_METRICS_PORT)" metrics_ok
   chk "vote history dir exists ($P_VH_DIR)" test -d "$P_VH_DIR"
@@ -323,9 +331,9 @@ doctor(){
 }
 
 CMD=${1:-}; shift || true
-YES=0; ANY=0; FORCE=0; PLAN=""; REGION=""; MAX_N=99
+YES=0; ANY=0; FORCE=0; WAIT=0; PLAN=""; REGION=""; MAX_N=99
 while [ $# -gt 0 ]; do case "$1" in
-  --yes) YES=1;; --any) ANY=1;; --force) FORCE=1;; --plan) PLAN=$2; shift;; --region) REGION=$2; shift;;
+  --yes) YES=1;; --wait) WAIT=1;; --any) ANY=1;; --force) FORCE=1;; --plan) PLAN=$2; shift;; --region) REGION=$2; shift;;
   --max) MAX_N=$2; shift;; --) shift; break;; *) break;; esac; shift; done
 export ANY PLAN REGION
 case "$CMD" in
@@ -334,7 +342,7 @@ case "$CMD" in
 esac
 fds_load_config
 case "$CMD" in
-  up|down|maintain|qualify|qualify-queue|bundle) fds_lock_or_exit ;;
+  up|down|failover|failback|qualify|qualify-queue|bundle) fds_lock_or_exit ;;
   watchdog) exec 9>>"$FDS_STATE_DIR/lock"
             if ! flock -n 9; then   # an operation runs; only complain if it runs suspiciously long
               (( $(date +%s) - $(stat -c %Y "$FDS_STATE_DIR/lock") > 3*3600 )) && alert "fd-standby lock held for more than 3 h - check for a stuck operation"
@@ -347,7 +355,8 @@ case "$CMD" in
   up) up ;;
   down) down ;;
   status) status ;;
-  maintain) maintain "$@" ;;
+  failover) failover ;;
+  failback) failback ;;
   qualify) [ $# -eq 3 ] || { echo "usage: fd-standby qualify PROVIDER PLAN REGION"; exit 2; }; qualify "$@" ;;
   qualify-queue) qualify_queue ;;
   watchdog) watchdog ;;

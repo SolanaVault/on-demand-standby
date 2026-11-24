@@ -84,7 +84,7 @@ s_setid(){ local a="" x; for x in "$@"; do a+=" $(q "$x")"; done
 p_no_setid(){ pkill -KILL -f "firedancer set-identity --config $PRIMARY_FD_CONFIG" 2>/dev/null; sleep 1; ! pgrep -f "firedancer set-identity --config $PRIMARY_FD_CONFIG" >/dev/null; }
 s_no_setid(){ sb "pkill -KILL -f 'firedancer set-identity' 2>/dev/null; sleep 1; ! pgrep -f 'firedancer set-identity' >/dev/null"; }
 s_pid(){ sb "systemctl show -p MainPID --value firedancer"; }
-p_pid(){ systemctl show -p MainPID --value "$FD_UNIT"; }
+p_pid(){ pgrep -o -f -- "run --config $PRIMARY_FD_CONFIG"; }   # the primary's Firedancer process
 
 # ------------------------------------------------------------------ metrics / lag
 p_metric(){ p_metrics | metric "$1"; }
@@ -145,7 +145,7 @@ status(){
 }
 
 precheck(){
-  systemctl is-active --quiet "$FD_UNIT" || refuse "primary $FD_UNIT not running"
+  [ -n "$(p_id)" ] || refuse "Firedancer on this primary does not answer get-identity"
   [ "$(sb systemctl is-active firedancer)" = active ] || refuse "standby firedancer not running"
   [ -n "$P_JUNK_PUB" ] && [ "$P_JUNK_PUB" != "$STAKED_PUBKEY" ] || refuse "primary junk key unreadable or staked"
   [[ "$S_JUNK_PUB" =~ ^$B58$ ]] && [ "$S_JUNK_PUB" != "$STAKED_PUBKEY" ] || refuse "standby junk key unreadable or staked"

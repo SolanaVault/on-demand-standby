@@ -21,7 +21,6 @@ fds_load_config(){
   # shellcheck disable=SC1090
   . "$FDS_CONF"
   : "${STAKED_PUBKEY:?set STAKED_PUBKEY in $FDS_CONF}" "${PRIMARY_FD_CONFIG:?}" "${PRIMARY_STAKED_KEY:?}" "${FD_BIN:?}"
-  FD_UNIT=${FD_UNIT:-firedancer.service}
   SSH_KEY=${SSH_KEY:-/root/.ssh/id_ed25519_fd_standby}
   CANDIDATES_FILE=${CANDIDATES_FILE:-/etc/fd-standby/candidates.conf}
   MAX_PRICE_PER_HOUR=${MAX_PRICE_PER_HOUR:-3.0}; USD_TO_EUR=${USD_TO_EUR:-0.92}
@@ -41,7 +40,7 @@ fds_load_config(){
 
 valid_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 
-# One mutating fd-standby operation at a time (maintain, up, down, qualify, swap, watchdog).
+# One mutating fd-standby operation at a time (failover, failback, up, down, qualify, swap, watchdog).
 # fd-standby takes the lock and exports FDS_LOCK_HELD for the fd-standby-swap it calls.
 fds_lock_or_exit(){
   [ "${FDS_LOCK_HELD:-0}" = 1 ] && return 0

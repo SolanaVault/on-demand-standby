@@ -4,32 +4,53 @@
 
 Commands: `fd-standby`, `fd-standby-swap`. A community tool, not affiliated with Jump Crypto, the Firedancer project, Jito or any server provider.
 
-You run one Firedancer validator. When you need to restart or upgrade it, `fd-standby maintain`:
+You run one Firedancer validator. Before you take it down — an upgrade, a reboot, a disk swap,
+anything — you run **`fd-standby failover`**:
 
-1. rents a bare-metal server by the hour (only server types that are **in stock right now** and **proven to work**),
+1. it rents a bare-metal server by the hour (only server types that are **in stock right now** and **proven to work**),
 2. sets it up automatically as a Firedancer node with a throwaway identity, using **your exact binary and config**,
-3. waits until it has caught up with the cluster,
-4. rehearses an identity switch on it with throwaway keys,
-5. moves your **staked identity** (with its vote history) to it — the voting gap is ~3.5 s,
-6. runs your maintenance command on the primary (default: restart Firedancer) and waits until the primary has caught up,
-7. moves the staked identity back (~3.8 s) and shreds the key copy on the standby,
-8. deletes the rented server.
+3. waits until it has caught up with the cluster and rehearses an identity switch on it with throwaway keys,
+4. moves your **staked identity** (with its fresh vote history) to it — the voting gap is ~4 s.
 
-A typical run takes 25–35 minutes and costs **one to two euros** (one hour of a server).
+Now the standby votes and you do whatever you need on your primary. **What happens in between is
+up to you; fd-standby does not touch your primary.** The only requirement: when you are done, the
+primary's Firedancer is running again on its **junk** identity (which is what a restart does, see
+Requirements) and has caught up. Then **`fd-standby failback`**:
+
+5. checks that the primary is ready (or waits for it with `--wait`),
+6. moves the staked identity back (~4 s), shreds the key copy on the standby and verifies that,
+7. deletes the rented server and verifies it is gone.
+
+A typical maintenance window costs **one to two euros** (one hour of a server).
 No second validator machine is needed for planned maintenance.
 
 ```
-$ fd-standby maintain --yes
-[06:44:34] creating cherry amd-threadripper-pro-7965wx in LT-Siauliai (~1.676/h)
-[06:56:..] delivered in 12 min
-[06:57:40] firedancer started            (disks, firewall, identity: discovered and set up automatically)
-[07:00:43] standby: switch to STAKED      switch took 3.4 s
-[07:01:24] running on primary: systemctl restart firedancer
-[07:07:17] primary caught up after 5 min
-[07:07:45] primary: switch to STAKED      switch took 3.8 s
-[07:08:22] server 1074140 is gone (ran 23 min)
-[07:08:22] MAINTAIN done
+$ fd-standby failover --yes
+[10:14:12] creating cherry amd-threadripper-pro-7965wx in LT-Siauliai (~1.676/h)
+[10:24:..] delivered in 10 min; firewall, disks, Firedancer set up; caught up
+[10:27:51] standby: switch to STAKED with the primary's vote history     voting gap ~4.1 s
+[10:28:..] FAILED OVER: standby votes. Do your work on this primary now ... then run: fd-standby failback
+
+$ systemctl restart firedancer        # <- your maintenance: upgrade, reboot, whatever
+
+$ fd-standby failback --wait
+[10:41:19] primary ready
+[10:41:50] primary: switch to STAKED                                      voting gap ~4.5 s
+[10:42:28] standby key shredded (verified)
+[10:42:37] server 1074252 deleted and gone (ran 28 min)
 ```
+
+### Typical maintenance (your part, between failover and failback)
+
+| Task | What you do | Notes |
+|---|---|---|
+| Firedancer upgrade | install the new binary, `systemctl restart firedancer` | the standby runs the *old* binary meanwhile (it was shipped at failover) |
+| Config change | edit the TOML, restart Firedancer | keep `[paths] identity_key` = junk key |
+| Reboot / kernel / BIOS | reboot | Firedancer must start again on its own (systemd) |
+| Longer work | anything | the watchdog alerts after 3 h but never deletes a standby that votes |
+
+Failback always returns to the machine `failover` was run on. Moving to a *new* primary server is not
+automated yet (set up the new box, then `fd-standby-swap` from it — open an issue if you need this).
 
 > **Status: early but real.** Developed and run against mainnet with FireBAM (Jito's Firedancer fork)
 > v26.10.8 under Alpenglow. Every server type listed as qualified below was actually rented,
@@ -75,7 +96,10 @@ Adding a provider = one file `lib/provider-NAME.sh` implementing six functions
 ## Requirements
 
 **Primary (your validator):**
-- Firedancer (full Firedancer, not Frankendancer) run by systemd. Tested with FireBAM v26.10.8 on Ubuntu 26.04.
+- Firedancer (full Firedancer, not Frankendancer). Tested with FireBAM v26.10.8 on Ubuntu 26.04.
+  fd-standby does not care how you run it (systemd, script, ...); it talks to it with
+  `firedancer get-identity / set-identity / wait` using your config file. Let your service manager
+  restart Firedancer on failure: after a restart it must come back by itself for `failback`.
 - Your Firedancer config's `[paths] identity_key` points to a **junk (unstaked) key**. The staked
   key lives in a separate root-only file and is applied with `set-identity`. This is what makes
   every restart safe: a node always starts unstaked.
@@ -97,11 +121,12 @@ sudo $EDITOR /etc/fd-standby/fd-standby.conf
 echo '<cherry api token>' | sudo tee /etc/fd-standby/cherry-api-token >/dev/null; sudo chmod 600 /etc/fd-standby/cherry-api-token
 sudo fd-standby doctor                # checks everything, changes nothing, spends nothing
 sudo fd-standby stock                 # qualified types in stock right now, cheapest first
-sudo fd-standby maintain              # the real thing (asks before moving the staked identity)
-sudo fd-standby maintain -- /usr/local/bin/my-upgrade-script   # custom maintenance command
+sudo fd-standby failover              # the real thing (asks before moving the staked identity)
+#   ... your maintenance on the primary ...
+sudo fd-standby failback --wait       # waits until the primary is caught up, moves back, deletes the standby
 ```
 
-Other commands: `up`, `status`, `down`, `qualify PROVIDER PLAN REGION`, `qualify-queue`,
+Other commands: `status`, `up`, `down`, `qualify PROVIDER PLAN REGION`, `qualify-queue`,
 `watchdog`, and `fd-standby-swap {status|to-standby|to-primary|rehearse} HOST [--dry-run]`.
 
 ## How it works
@@ -120,6 +145,13 @@ Other commands: `up`, `status`, `down`, `qualify PROVIDER PLAN REGION`, `qualify
   than 6 h, never deletes one that is voting.
 
 ## Snapshots
+
+**Known effect of a single snapshot source:** snappie publishes a new full snapshot every 25,000
+slots (~1.5 h), and its incrementals always build on the newest one. If that rollover happens while
+a node is downloading the previous full snapshot, no matching incremental exists anymore and
+Firedancer gives up after `wait_for_peers_timeout_seconds` (30 s) — the next start downloads the
+new full snapshot and works. We hit this once (a restart took 12.6 instead of ~6 minutes). A second
+trusted source in `allow_list` reduces it.
 
 The standby downloads a fresh snapshot on every start. We use
 [snappie.sh](https://snappie.sh) as the only trusted source

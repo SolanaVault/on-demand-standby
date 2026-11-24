@@ -77,8 +77,8 @@ how the tooling prevents that, what it was tested against, and where the remaini
 | Rehearsal on standby fails | abort before any swap |
 | Swap to standby fails before the primary went to junk | abort, primary still votes, standby deleted |
 | Swap fails after the primary went to junk | automatic restore of the primary **only** if all restore conditions hold (invariant 10); otherwise alert "NOBODY IS VOTING" with the actual state |
-| Maintenance command fails / primary does not catch up | **standby keeps voting**, alert, nothing deleted — fix the primary, then `fd-standby-swap to-primary HOST` |
-| Swap back fails | automatic restore of the standby under the same conditions, alert, standby stays |
+| Primary not ready at failback (not junk / not caught up / not answering) | **standby keeps voting**, failback refuses and says why; `--wait` waits up to `CATCHUP_MAX_S` and alerts if the standby stops voting meanwhile |
+| Failback swap fails | automatic restore of the standby under the same conditions, alert, standby stays |
 | No fresh vote-history file after the switch | no automatic restore (history unclear), alert with actual state |
 
 Typical voting gap per switch measured on mainnet: 3.4–3.8 s (script overhead included), plus

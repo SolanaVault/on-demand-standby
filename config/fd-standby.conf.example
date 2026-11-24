@@ -15,8 +15,6 @@ PRIMARY_FD_CONFIG=/etc/firedancer/mainnet.toml
 PRIMARY_STAKED_KEY=/etc/firedancer/keys/staked-identity.json
 # Firedancer binary on the primary (its exact build is shipped to the standby).
 FD_BIN=/opt/firedancer/bin/firedancer
-# systemd unit that runs Firedancer on the primary.
-FD_UNIT=firedancer.service
 
 # ---------------------------------------------------------------- providers
 # Cherry Servers (https://api.cherryservers.com): API token file and project id.
