@@ -95,6 +95,9 @@ def free_region(disk):
 for b in d:
     if b["type"]!="disk": continue
     if b.get("children"):
+        # only plain partitioned disks: a whole-disk RAID member (md metadata at the end) shows
+        # the table of the array on the raw disk - never append there
+        if b.get("fstype") or any(c.get("type")!="part" for c in b["children"]): continue
         r=free_region(b["path"])
         if r: out.append(r)
         continue
@@ -161,7 +164,7 @@ make_part(){ local disk start sectors line part
   partx -a "$disk" 2>/dev/null || true; udevadm settle
   line=$(sfdisk -d "$disk" | grep -E "start=\s*$start,") || fail "new partition on $disk not found"
   part=${line%% *}; [ -b "$part" ] || fail "new partition $part has no device node"
-  log "created $part in free space of $disk (table backup in /root)"; echo "$part"; }
+  log "created $part in free space of $disk (table backup in /root)" >&2; echo "$part"; }   # stdout = path only
 mkfs_label(){ local dev=$1 label=$2
   [[ "$dev" == free:* ]] && dev=$(make_part "$dev")
   blkid "$dev" >/dev/null 2>&1 && { echo "refusing: $dev has a signature"; exit 1; }; mkfs.xfs -q -L "$label" "$dev"; }

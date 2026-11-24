@@ -5,7 +5,7 @@
 # the account limit refused the create. See README "Providers".
 
 VU_API=https://api.vultr.com/v2
-vu(){ curl -s -m 60 -H "Authorization: Bearer $(tr -d '\n\r ' <"$VULTR_KEY_FILE")" -H 'Content-Type: application/json' "$@"; }
+vu(){ printf 'Authorization: Bearer %s\n' "$(tr -d '\n\r ' <"$VULTR_KEY_FILE")" | curl -s -m 60 -H @- -H 'Content-Type: application/json' "$@"; }   # token not in argv
 
 vultr_enabled(){ [ -s "${VULTR_KEY_FILE:-/nonexistent}" ]; }
 

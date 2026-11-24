@@ -53,7 +53,7 @@ Failback always returns to the machine `failover` was run on. Moving to a *new* 
 automated yet (set up the new box, then `fd-standby-swap` from it — open an issue if you need this).
 
 > **Status: early but real.** Developed and run against mainnet with FireBAM (Jito's Firedancer fork)
-> v26.10.8 under Alpenglow. Every server type listed as qualified below was actually rented,
+> v26.10.8 under Alpenglow, on one validator so far. Every server type listed as qualified below was actually rented,
 > set up, caught up and swapped. Read [SAFETY.md](SAFETY.md) before using it on a staked validator.
 
 ## Qualified servers
@@ -111,6 +111,7 @@ never touched; data disks are found by "whole disk, no partitions, no signature,
 Plans with only two disks (< 2 TB each) are ordered with a 50 GB OS partition
 (`CHERRY_OS_PARTITION_GB`); the setup then *adds* one data partition in the unallocated space
 behind the existing partitions (GPT only, table backed up first) and never modifies existing ones.
+**This 2-disk path is experimental**: no 2-disk plan has been qualified with it yet.
 
 ## Quick start
 
@@ -121,7 +122,7 @@ sudo $EDITOR /etc/fd-standby/fd-standby.conf
 echo '<cherry api token>' | sudo tee /etc/fd-standby/cherry-api-token >/dev/null; sudo chmod 600 /etc/fd-standby/cherry-api-token
 sudo fd-standby doctor                # checks everything, changes nothing, spends nothing
 sudo fd-standby stock                 # qualified types in stock right now, cheapest first
-sudo fd-standby failover              # the real thing (asks before moving the staked identity)
+sudo fd-standby failover              # the real thing (asks once, before renting; run it in tmux/screen)
 #   ... your maintenance on the primary ...
 sudo fd-standby failback --wait       # waits until the primary is caught up, moves back, deletes the standby
 ```

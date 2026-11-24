@@ -46,7 +46,7 @@ stock_lines(){
 BUNDLE_TGZ=$FDS_STATE_DIR/bundle.tgz
 bundle(){
   local d real rel; d=$(mktemp -d); real=$(readlink -f "$FD_BIN")
-  rel=$(basename "$(dirname "$real")"); [ "$rel" = bin ] && rel="fd-$("$FD_BIN" --version | awk '{print $1}')"
+  rel=$(basename "$(dirname "$real")"); [ "$rel" = bin ] && rel="fd-$(fdcli --version | awk '{print $1}')"
   mkdir -p "$d/bin" "$d/config" "$d/units"
   install -m 755 "$real" "$d/bin/firedancer"; echo "$rel" > "$d/bin/release"
   cp "$FDS_ROOT/standby/standby-init.sh" "$FDS_ROOT/standby/standby.nft.in" "$FDS_ROOT/standby/60-fd-tcp-rmem.conf" "$d/"
@@ -117,6 +117,9 @@ standby_state(){ local ip=$1 id junk
 safe_to_delete(){ local ip=$1 st
   [ "$(p_id)" = "$STAKED_PUBKEY" ] && return 0
   valid_ip "$ip" || return 1
+  # the standby of a failover holds the freshest vote history even if it crashed back to junk:
+  # never delete it while this primary is not voting (see SAFETY.md "standby crashed")
+  [ -s "$FDS_STATE" ] && [ "$ip" = "$(state_get ip)" ] && [ "${FORCE:-0}" != 1 ] && return 1
   st=$(standby_state "$ip"); [ "$st" = junk ]; }
 
 # ------------------------------------------------------------------ up / down
@@ -193,7 +196,11 @@ down(){
 
 list_tagged(){ local p rc=0; for p in $PROVIDERS; do "${p}_enabled" || continue; "${p}_list_tagged" || rc=1; done; return $rc; }
 
+both_staked_check(){ local ip; ip=$(state_get ip)
+  [ -s "$FDS_STATE" ] && valid_ip "$ip" && [ "$(p_id)" = "$STAKED_PUBKEY" ] && [ "$(standby_state "$ip")" = staked ] || return 0
+  alert "BOTH NODES STAKED: this primary AND standby $ip run $STAKED_PUBKEY - switch this primary to its junk key NOW: $FD_BIN set-identity --config $PRIMARY_FD_CONFIG $P_JUNK_KEY"; return 1; }
 status(){
+  both_staked_check
   if [ -s "$FDS_STATE" ]; then cat "$FDS_STATE"; echo; valid_ip "$(state_get ip)" && "$SWAP" status "$(state_get ip)"; else echo "no standby"; fi
   echo "tagged servers at providers:"; list_tagged | sed 's/^/  /'
 }
@@ -208,9 +215,13 @@ failover(){
   [ "$(p_id)" = "$STAKED_PUBKEY" ] || die "this primary is not running the staked identity - nothing to fail over"
   [ -s "$FDS_STATE" ] && die "a standby is already recorded ($(state_get ip)) - check: fd-standby status"
   [ "${YES:-0}" = 1 ] || { read -r -p "  >>> rent a standby and move the STAKED identity to it? [yes/NO] " a </dev/tty; [ "$a" = yes ] || die "not confirmed"; }
-  local ip rc; ip=$(up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
+  local ip rc
+  trap 'trap "" INT HUP TERM; say "interrupted before the swap: deleting the standby"; [ -s "$FDS_STATE" ] && down; exit 130' INT HUP TERM
+  ip=$(up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
   "$SWAP" rehearse "$ip" </dev/null >/dev/null 2>&1 || { down; die "rehearsal on standby failed (standby deleted)"; }
+  trap 'say "signal ignored: the swap finishes or rolls back first"' INT HUP TERM
   swap_retry 6 to-standby "$ip"; rc=$?
+  trap - INT HUP TERM
   case $rc in
     0) ;;
     20) down; die "swap to standby refused repeatedly - nothing changed, standby deleted";;
@@ -223,6 +234,7 @@ failover(){
 primary_ready(){  # prints the reason when not ready
   local id lag; id=$(p_id)
   [ -n "$id" ] || { echo "Firedancer on this primary does not answer get-identity"; return 1; }
+  if [ "$id" = "$STAKED_PUBKEY" ]; then both_staked_check >/dev/null 2>&1; echo "primary runs the STAKED key while the standby is recorded (alerted)"; return 1; fi
   [ "$id" = "$(keypub_local "$P_JUNK_KEY")" ] || { echo "primary runs $id, not its junk key"; return 1; }
   lag=$(lag_of "$(p_metrics | metric replay_reset_slot | cut -d. -f1)")
   [ "$lag" -le "$SWAP_MAX_LAG" ] || { echo "primary not caught up (lag $lag)"; return 1; }
@@ -239,7 +251,9 @@ failback(){
     sleep 15; waited=$((waited+15)); ((waited>CATCHUP_MAX_S)) && die "primary still not ready after $((CATCHUP_MAX_S/60)) min: $why (standby keeps voting)"
   done
   say "primary ready"
+  trap 'say "signal ignored: the swap finishes or rolls back first"' INT HUP TERM
   swap_retry 10 to-primary "$ip"; rc=$?
+  trap - INT HUP TERM
   [ $rc = 0 ] || die "failback failed (rc $rc); standby $ip left running (state: $(standby_state "$ip")) - check: fd-standby status"
   down
   say "FAILBACK done: this primary votes again, standby deleted"
@@ -250,7 +264,7 @@ qualify(){
   local prov=$1 plan=$2 region=$3 ip t cold
   [ -s "$FDS_STATE" ] && die "a standby exists (state file) - qualify only runs when no standby is in use"
   [[ "$prov $plan $region" =~ ^[a-z]+\ [A-Za-z0-9._-]+\ [A-Za-z0-9._-]+$ ]] || die "bad provider/plan/region"
-  grep -qE "^$prov +$plan +$region " "$CANDIDATES_FILE" || echo "$prov $plan $region no" >> "$CANDIDATES_FILE"
+  grep -qE "^$prov +${plan//./\\.} +$region " "$CANDIDATES_FILE" || echo "$prov $plan $region no" >> "$CANDIDATES_FILE"
   say "QUALIFY $prov $plan $region (throwaway keys only)"
   ip=$(PLAN=$plan REGION=$region up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
   [ "$(state_get plan)" = "$plan" ] || { down; die "got a different plan"; }
@@ -264,7 +278,8 @@ qualify(){
   "$SWAP" status "$ip" </dev/null
   down
   # same plan = same hardware: qualify the plan in every region (proven in $region)
-  sed -i -E "s/^($prov +$plan +[A-Za-z0-9-]+ +)no\\b.*/\\1yes   # qualified $(date -u +%F) in $region, cold restart ${cold}s/" "$CANDIDATES_FILE"
+  local plan_re=${plan//./\\.}
+  sed -i -E "s/^($prov +$plan_re +[A-Za-z0-9-]+ +)no\\b.*/\\1yes   # qualified $(date -u +%F) in $region, cold restart ${cold}s/" "$CANDIDATES_FILE"
   echo "$(date -u +%F) $prov $plan $region cold_restart_s=$cold hw=$hw" >> "$FDS_STATE_DIR/qualifications.log"
   say "QUALIFIED $prov $plan $region (cold restart to caught up: ${cold}s; $hw)"
 }
@@ -286,6 +301,7 @@ watchdog(){
   tagged=$(list_tagged) || alert "watchdog: provider listing failed - cannot see standbys"
   if [ -s "$FDS_STATE" ] && valid_ip "$(state_get ip)" && [ "$(p_id)" != "$STAKED_PUBKEY" ] && [ "$(standby_state "$(state_get ip)")" != staked ]; then
     alert "watchdog: NEITHER the primary nor standby $(state_get ip) reports the staked identity"; fi
+  both_staked_check
   while read -r prov id ip created <&3; do
     [ -n "$prov" ] || continue
     [[ "$created" =~ ^[0-9]+$ ]] || { alert "watchdog: cannot read age of $prov $id"; continue; }

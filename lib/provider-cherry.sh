@@ -9,7 +9,8 @@
 #   <p>_list_tagged                     lines "provider id ip created_epoch" for our standbys
 
 CH_API=https://api.cherryservers.com/v1
-ch(){ curl -s -m 60 -H "Authorization: Bearer $(tr -d '\n\r ' <"$CHERRY_TOKEN_FILE")" -H 'Content-Type: application/json' "$@"; }
+# the token goes to curl through a pipe (-H @-), never on its command line (visible in /proc)
+ch(){ printf 'Authorization: Bearer %s\n' "$(tr -d '\n\r ' <"$CHERRY_TOKEN_FILE")" | curl -s -m 60 -H @- -H 'Content-Type: application/json' "$@"; }
 
 cherry_enabled(){ [ -s "${CHERRY_TOKEN_FILE:-/nonexistent}" ] && [ -n "${CHERRY_PROJECT_ID:-}" ]; }
 
