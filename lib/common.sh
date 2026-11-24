@@ -117,9 +117,12 @@ s_metrics(){ sshs "$1" "curl -s -m 3 127.0.0.1:$P_METRICS_PORT/metrics"; }
 B58='[1-9A-HJ-NP-Za-km-z]{32,44}'
 # get-identity must exit 0 and its LAST line must be exactly one base58 pubkey; anything else = "" (unknown)
 _last_pubkey(){ local out rc; out=$("$@"); rc=$?; ((rc==0)) || return 0; out=$(printf '%s\n' "$out" | tail -1 | tr -d '[:space:]'); [[ "$out" =~ ^$B58$ ]] && echo "$out"; return 0; }
-p_id(){ (cd /tmp && _last_pubkey timeout 20 "$FD_BIN" get-identity --config "$PRIMARY_FD_CONFIG" 2>/dev/null); }
+# Firedancer's CLI sandbox refuses unknown open fds ("unexpected file descriptor 9"): never let it
+# inherit our lock (fd 9). Every local firedancer invocation goes through fdcli.
+fdcli(){ "$FD_BIN" "$@" 9>&-; }
+p_id(){ (cd /tmp && _last_pubkey timeout 20 "$FD_BIN" get-identity --config "$PRIMARY_FD_CONFIG" 2>/dev/null 9>&-); }
 s_id(){ _last_pubkey sshs "$1" "cd /tmp && timeout 20 $S_FD_BIN get-identity --config $S_FD_CFG 2>/dev/null"; }
-keypub_local(){ (cd /tmp && "$FD_BIN" keys pubkey "$1" --config "$PRIMARY_FD_CONFIG" 2>/dev/null | tail -1); }
+keypub_local(){ (cd /tmp && fdcli keys pubkey "$1" --config "$PRIMARY_FD_CONFIG" 2>/dev/null | tail -1); }
 keypub_remote(){ sshs "$1" "cd /tmp && $S_FD_BIN keys pubkey $2 --config $S_FD_CFG 2>/dev/null" | tail -1; }
 slot_of(){ local v; v=$(metric replay_reset_slot); echo "${v%.*}"; }
 

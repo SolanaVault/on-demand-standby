@@ -77,7 +77,7 @@ changed(){  # identities were touched and the swap is not complete: report the A
   esac
   exit $EX_CHANGED; }
 
-p_setid(){ (cd /tmp && timeout -s KILL $SETID_TIMEOUT "$FD_BIN" set-identity --config "$PRIMARY_FD_CONFIG" "$@"); }
+p_setid(){ (cd /tmp && timeout -s KILL $SETID_TIMEOUT "$FD_BIN" set-identity --config "$PRIMARY_FD_CONFIG" "$@" 9>&-); }
 s_setid(){ local a="" x; for x in "$@"; do a+=" $(q "$x")"; done
   sb "cd /tmp && timeout -s KILL $SETID_TIMEOUT $S_FD_BIN set-identity --config $S_FD_CFG$a"; }
 # no set-identity may still be running on the other node before we restore (else it could land late)
@@ -179,7 +179,7 @@ to_standby(){
   trap 's_shred_key >/dev/null 2>&1' EXIT          # until the standby is verified staked
 
   say "2/5 primary: wait for a safe window"
-  (cd /tmp && timeout 900 "$FD_BIN" wait --config "$PRIMARY_FD_CONFIG") || refuse "firedancer wait failed"
+  (cd /tmp && timeout 900 "$FD_BIN" wait --config "$PRIMARY_FD_CONFIG" 9>&-) || refuse "firedancer wait failed"
 
   say "3/5 primary: switch to junk (voting stops)"
   local t0 t spid; t0=$(date +%s.%N); t=$(date +%s); spid=$(s_pid)
