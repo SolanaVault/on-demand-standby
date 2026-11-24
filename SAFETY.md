@@ -62,6 +62,10 @@ how the tooling prevents that, what it was tested against, and where the remaini
   "rollback unless confirmed" timer and only confirmed after the whole setup — on a slow setup the
   rollback would have removed the firewall for good. Firewall is now its own stage, confirmed by a
   new SSH login immediately, and verified again before the staked key is sent.
+- **Providers reuse IP addresses.** A new server can get the IP of an earlier one, and SSH then
+  (correctly) refuses the changed host key. For every newly created server the old known-hosts
+  entry for its IP is removed before the first connection; the new key is pinned for the rest of the
+  run and checked on every later connection (trust on first use per server).
 - **Do not edit the scripts while a run is in progress** (bash reads scripts incrementally).
 
 ## What happens when things fail

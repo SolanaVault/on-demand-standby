@@ -150,6 +150,9 @@ up(){
     done
     if ! valid_ip "$ip"; then destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"; continue; fi
     state_put "$prov" "$id" "$ip" "$plan" "$region" "$t0"
+    # Providers reuse IPs: a NEW server may have the IP of an earlier one. Forget any old host key
+    # for this IP now; the new key is pinned on first contact and verified on every later connection.
+    ssh-keygen -q -R "$ip" -f "$FDS_KNOWN_HOSTS" >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do sshs "$ip" true </dev/null 2>/dev/null && break; sleep 10; done
     say "delivered in $(( ($(date +%s)-t0)/60 )) min: $ip"
     if ! sshs "$ip" "rm -rf /root/fd-standby-bundle && mkdir -p /root/fd-standby-bundle && tar -C /root/fd-standby-bundle -xzf -" < "$BUNDLE_TGZ"; then
@@ -182,6 +185,7 @@ down(){
     alert "FORCED delete of standby $ip in state $(standby_state "$ip")"; fi
   if valid_ip "$ip"; then sshs "$ip" "shred -u /run/fd-standby/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || alert "could not verify key removal on $ip before deletion (tmpfs, dies with the server)"; fi
   destroy_verified "$prov" "$id" || die "server $id not confirmed gone (state file kept)"
+  valid_ip "$ip" && ssh-keygen -q -R "$ip" -f "$FDS_KNOWN_HOSTS" >/dev/null 2>&1
   rm -f "$FDS_STATE_DIR/known_hosts.$prov-$id"
   say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$FDS_STATE"
 }
