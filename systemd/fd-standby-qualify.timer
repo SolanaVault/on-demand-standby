@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily attempt to qualify one more server type (optional; enable only if you want this)
+[Timer]
+OnCalendar=*-*-* 10:00:00
+RandomizedDelaySec=2h
+Persistent=true
+[Install]
+WantedBy=timers.target

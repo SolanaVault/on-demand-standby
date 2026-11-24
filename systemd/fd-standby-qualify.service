@@ -1,0 +1,5 @@
+[Unit]
+Description=fd-standby: qualify at most one new in-stock server type (throwaway keys only, costs ~1 hour of that server)
+[Service]
+Type=oneshot
+ExecStart=/opt/fd-standby/bin/fd-standby qualify-queue --max 1

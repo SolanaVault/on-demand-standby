@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Hot-swap the staked identity between THIS Firedancer node (primary) and a
+# Firedancer standby reached over SSH (see fd-standby). Reads /etc/fd-standby/fd-standby.conf.
+#
+#   fd-standby-swap status   HOST
+#   fd-standby-swap to-standby HOST [--dry-run] [--yes]   primary(staked) -> standby(staked)
+#   fd-standby-swap to-primary HOST [--dry-run] [--yes]   standby(staked) -> primary(staked)
+#   fd-standby-swap rehearse HOST                          standby-only: junk -> 2nd throwaway -> junk
+#
+# Safety rules:
+#  - before every STAKED set-identity, the OTHER node must report a non-staked identity
+#  - the old voter goes to junk first, then its vote history is copied, then the new
+#    voter switches with --vote-history-file
+#  - the staked keypair is pushed to the standby only for to-standby and shredded
+#    there by to-primary (and by `fd-standby-swap shred-key HOST`)
+set -uo pipefail
+
+# shellcheck source=../lib/common.sh
+. "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+fds_load_config
+STAKED_PUB=$STAKED_PUBKEY
+FD=$FD_BIN                    # primary binary
+SFD=$S_FD_BIN                 # standby binary (fixed standby layout, see lib/common.sh)
+P_CFG=$PRIMARY_FD_CONFIG
+P_STAKED_KEY=$PRIMARY_STAKED_KEY
+S_CFG=$S_FD_CFG
+FDU=${P_USER:-firedancer}     # Firedancer [user] (same name on the standby)
+LOG=$FDS_STATE_DIR/swap.log
+
+CMD=${1:-}; HOST=${2:-}; shift 2 2>/dev/null || true
+DRY=0; YES=0; VERIFY=120
+for a in "$@"; do case "$a" in --dry-run) DRY=1;; --yes) YES=1;; --verify=*) VERIFY=${a#--verify=};; *) echo "unknown arg $a"; exit 2;; esac; done
+[ -n "$CMD" ] && [ -n "$HOST" ] || { sed -n 2,16p "$0"; exit 2; }
+exec > >(tee -a "$LOG") 2>&1
+say(){ printf '\033[1;34m[%s]\033[0m %s\n' "$(date -u +%T)" "$*"; }
+die(){ printf '\033[1;31mABORT:\033[0m %s\n' "$*"; exit 1; }
+ok(){ printf '  \033[32mOK\033[0m %s\n' "$*"; }
+run(){ if ((DRY)); then echo "  DRY-RUN would run: $*"; else "$@"; fi; }
+confirm(){ ((YES||DRY)) && return 0; read -r -p "  >>> $* [yes/NO] " a </dev/tty; [ "$a" = yes ] || die "not confirmed"; }
+SSHOPT=$(SSHOPT_STR)
+sb(){ sshs "$HOST" "$@"; }
+
+s_id(){ sb "cd /tmp && $SFD get-identity --config $S_CFG 2>/dev/null" | grep -Eo "$B58" | tail -1; }   # p_id: lib/common.sh
+p_metric(){ p_metrics | awk -v m="$1" '$1 ~ "^"m {print $2}' | head -1; }
+s_metric(){ sb "curl -s -m 3 127.0.0.1:$P_METRICS_PORT/metrics" | awk -v m="$1" '$1 ~ "^"m {print $2}' | head -1; }
+p_slot(){ local l; l=$(p_metric replay_reset_slot); echo "${l%.*}"; }
+s_slot(){ local l; l=$(s_metric replay_reset_slot); echo "${l%.*}"; }
+p_lag(){ lag_of "$(p_slot)" "$(s_slot)"; }
+s_lag(){ lag_of "$(s_slot)" "$(p_slot)"; }
+s_keypub(){ sb "cd /tmp && $SFD keys pubkey $1 --config $S_CFG 2>/dev/null" | tail -1; }
+
+# After set-identity away from X, Firedancer's votor renames vote_history-X.bin to
+# vote_history-X.bin.bak (fd_votor_tile.c ~1795). So the history to hand over is the .bak.
+VH_BAK=vote_history-$STAKED_PUB.bin.bak
+rollback_primary(){
+  echo "  !!! hand-over failed - restoring STAKED identity on the PRIMARY"
+  [ "$(s_id)" != "$STAKED_PUB" ] || { echo "  standby reports staked - NOT restoring primary"; return 1; }
+  local f; f=$P_VH_DIR/vh-rollback-$(date +%s).bin
+  cp -p "$P_VH_DIR/$VH_BAK" "$f" && chown $FDU:$FDU "$f"
+  (cd /tmp && $FD set-identity --config $P_CFG --vote-history-file "$f" $P_STAKED_KEY) && echo "  primary restored: $(p_id)"
+  sb "shred -u $S_STAKED_KEY 2>/dev/null"; true
+}
+rollback_standby(){
+  echo "  !!! hand-back failed - restoring STAKED identity on the STANDBY"
+  [ "$(p_id)" != "$STAKED_PUB" ] || { echo "  primary reports staked - NOT restoring standby"; return 1; }
+  sb "f=$S_VH_DIR/vh-rollback-\$(date +%s).bin; cp -p $S_VH_DIR/$VH_BAK \$f && chown $FDU:$FDU \$f && cd /tmp && $SFD set-identity --config $S_CFG --vote-history-file \$f $S_STAKED_KEY" && echo "  standby restored: $(s_id)"
+}
+
+status(){
+  say "status (standby $HOST)"
+  echo "  primary : $(p_id)  lag=$(p_lag) rank=$(p_metric votor_rank) bam_healthy=$(p_metric bam_healthy)"
+  echo "  standby : $(s_id)  lag=$(s_lag) rank=$(s_metric votor_rank) bam_healthy=$(s_metric bam_healthy) active=$(sb systemctl is-active firedancer)"
+  echo "  vote    : $(vote_state)"
+}
+
+precheck(){
+  systemctl is-active --quiet "$FD_UNIT" || die "primary Firedancer ($FD_UNIT) not running"
+  [ "$(sb systemctl is-active firedancer)" = active ] || die "standby firedancer not running"
+  # lag vs the public RPC's processed slot jitters by 5-20 slots; use the best of 5 samples
+  local pl=999999 sl=999999 x i
+  for i in 1 2 3 4 5; do x=$(p_lag); ((x<pl)) && pl=$x; x=$(s_lag); ((x<sl)) && sl=$x; sleep 2; done
+  # replay_reset_slot tracks the FINALIZED slot (= votor_highest_final_cert_slot), so vs the
+  # RPC's processed tip it normally reads 5-20 slots behind without being late. Fail only on
+  # >30 (~6 s); additionally the two nodes must be within 10 slots of each other.
+  [ "$pl" -le 30 ] || die "primary lag $pl (>30, best of 5)"; [ "$sl" -le 30 ] || die "standby lag $sl (>30, best of 5)"
+  local d=999999; for i in 1 2 3 4 5; do x=$(( $(p_slot) - $(s_slot) )); x=${x#-}; ((x<d)) && d=$x; sleep 1; done
+  [ "$d" -le 10 ] || die "nodes $d slots apart (>10)"
+  ok "both caught up (primary lag $pl, standby lag $sl)"
+  [ "$(s_keypub $S_JUNK_KEY)" != "$STAKED_PUB" ] && [ -n "$(s_keypub $S_JUNK_KEY)" ] || die "standby junk key missing or staked?!"
+  ok "standby junk key present"
+}
+
+to_standby(){
+  say "SWAP primary -> standby $HOST (dry-run=$DRY)"
+  precheck
+  [ "$(p_id)" = "$STAKED_PUB" ] || die "primary is not staked (is $(p_id))"
+  [ "$(s_id)" != "$STAKED_PUB" ] || die "standby ALREADY staked"
+  [ -f "$P_STAKED_KEY" ] || die "staked key missing on primary ($P_STAKED_KEY)"
+  ok "primary=staked, standby=junk"
+
+  say "1/6 push staked key to standby (root 600, verified by pubkey)"
+  confirm "copy the STAKED keypair to $HOST?"
+  run sh -c "ssh $SSHOPT root@$HOST 'install -d -m 700 /etc/firedancer/keys; umask 077; cat > $S_STAKED_KEY.tmp && mv $S_STAKED_KEY.tmp $S_STAKED_KEY' < $P_STAKED_KEY"
+  ((DRY)) || { [ "$(s_keypub $S_STAKED_KEY)" = "$STAKED_PUB" ] || die "pushed key does not verify"; ok "standby has the staked key"; }
+
+  say "2/6 primary: wait for a safe window"
+  confirm "run firedancer wait on primary?"
+  run sh -c "cd /tmp && timeout 900 $FD wait --config $P_CFG" || die "wait failed"
+
+  say "3/6 primary: switch to junk"
+  confirm "switch PRIMARY to junk now (voting stops)?"
+  local t0; t0=$(date +%s.%N)
+  run sh -c "cd /tmp && $FD set-identity --config $P_CFG $P_JUNK_KEY" || die "primary set-identity junk failed - CHECK"
+  ((DRY)) || { [ "$(p_id)" != "$STAKED_PUB" ] || die "primary still staked - STOP"; ok "primary now $(p_id)"; }
+
+  say "4/6 copy vote history primary -> standby"
+  local src=$P_VH_DIR/$VH_BAK dst=$S_VH_DIR/vote_history-$STAKED_PUB.from-peer.bin
+  ((DRY)) || [ -s "$src" ] || { rollback_primary; die "vote history $src missing (rolled back)"; }
+  run sh -c "ssh $SSHOPT root@$HOST 'cat > $dst.tmp && mv $dst.tmp $dst && chown $FDU:$FDU $dst' < $src" || { rollback_primary; die "vote history copy failed (rolled back)"; }
+
+  say "5/6 standby: switch to STAKED with primary's vote history"
+  ((DRY)) || [ "$(p_id)" != "$STAKED_PUB" ] || die "SAFETY: primary reports staked - refusing"
+  confirm "switch STANDBY to $STAKED_PUB now?"
+  run sb "cd /tmp && $SFD set-identity --config $S_CFG --vote-history-file $dst $S_STAKED_KEY" || { rollback_primary; die "standby set-identity failed (rolled back to primary)"; }
+  ((DRY)) || echo "  switch took $(python3 -c "import time;print('%.1f s'%(time.time()-$t0))")"
+
+  say "6/6 verify"
+  ((DRY)) && return 0
+  [ "$(s_id)" = "$STAKED_PUB" ] && ok "standby runs $STAKED_PUB" || echo "  WARN standby identity $(s_id)"
+  for i in $(seq 1 $((VERIFY/10))); do sleep 10; echo "  t+$((i*10))s rank=$(s_metric votor_rank) bam=$(s_metric bam_healthy) vote=[$(vote_state)]"; done
+}
+
+to_primary(){
+  say "SWAP standby $HOST -> primary (dry-run=$DRY)"
+  precheck
+  [ "$(s_id)" = "$STAKED_PUB" ] || die "standby is not staked (is $(s_id))"
+  [ "$(p_id)" != "$STAKED_PUB" ] || die "primary ALREADY staked"
+  [ -f "$P_STAKED_KEY" ] || die "staked key missing on primary"
+  ok "standby=staked, primary=junk"
+
+  say "1/5 standby: wait for a safe window"
+  confirm "run firedancer wait on standby?"
+  run sb "cd /tmp && timeout 900 $SFD wait --config $S_CFG" || die "wait failed"
+
+  say "2/5 standby: switch to junk"
+  confirm "switch STANDBY to junk now (voting stops)?"
+  local t0; t0=$(date +%s.%N)
+  run sb "cd /tmp && $SFD set-identity --config $S_CFG $S_JUNK_KEY" || die "standby set-identity junk failed - CHECK"
+  ((DRY)) || { [ "$(s_id)" != "$STAKED_PUB" ] || die "standby still staked - STOP"; ok "standby now $(s_id)"; }
+
+  say "3/5 copy vote history standby -> primary"
+  local dst=$P_VH_DIR/vote_history-$STAKED_PUB.from-peer.bin
+  run sh -c "ssh $SSHOPT root@$HOST 'cat $S_VH_DIR/$VH_BAK' > $dst.tmp && mv $dst.tmp $dst && chown $FDU:$FDU $dst" || { rollback_standby; die "vote history copy failed (rolled back)"; }
+  ((DRY)) || [ -s "$dst" ] || { rollback_standby; die "vote history copy empty (rolled back)"; }
+
+  say "4/5 primary: switch to STAKED"
+  ((DRY)) || [ "$(s_id)" != "$STAKED_PUB" ] || die "SAFETY: standby reports staked - refusing"
+  confirm "switch PRIMARY to $STAKED_PUB now?"
+  run sh -c "cd /tmp && $FD set-identity --config $P_CFG --vote-history-file $dst $P_STAKED_KEY" || { rollback_standby; die "primary set-identity failed (rolled back to standby)"; }
+  ((DRY)) || echo "  switch took $(python3 -c "import time;print('%.1f s'%(time.time()-$t0))")"
+
+  say "5/5 shred staked key on standby + verify"
+  run sb "shred -u $S_STAKED_KEY 2>/dev/null; test ! -e $S_STAKED_KEY" && ok "standby key shredded"
+  ((DRY)) && return 0
+  for i in $(seq 1 $((VERIFY/10))); do sleep 10; echo "  t+$((i*10))s rank=$(p_metric votor_rank) bam=$(p_metric bam_healthy) vote=[$(vote_state)]"; done
+}
+
+rehearse(){
+  say "REHEARSAL on standby $HOST (throwaway keys only)"
+  [ "$(s_id)" != "$STAKED_PUB" ] || die "standby runs the staked identity - no rehearsal"
+  local j2=/home/$FDU/rehearsal-identity.json
+  sb "test -f $j2 || (cd /tmp && rm -f identity && $SFD keys new identity --config $S_CFG >/dev/null 2>&1 && install -m 600 -o $FDU -g $FDU /tmp/identity $j2 && shred -u /tmp/identity)"
+  echo "  current=$(s_id)  rehearsal-key=$(s_keypub $j2)  lag=$(s_lag)"
+  local t0; t0=$(date +%s.%N)
+  sb "cd /tmp && timeout 900 $SFD wait --config $S_CFG | tail -1"
+  sb "cd /tmp && $SFD set-identity --config $S_CFG $j2" || die "set-identity rehearsal failed"
+  echo "  switched to $(s_id) in $(python3 -c "import time;print('%.1f s'%(time.time()-$t0))") (incl. wait); lag=$(s_lag)"
+  sleep 10
+  sb "cd /tmp && $SFD set-identity --config $S_CFG $S_JUNK_KEY" || die "switch back failed"
+  echo "  back to $(s_id); lag=$(s_lag)"
+}
+
+shred_key(){ sb "shred -u $S_STAKED_KEY 2>/dev/null; test ! -e $S_STAKED_KEY" && ok "no staked key on $HOST"; }
+
+case "$CMD" in
+  status) status ;;
+  to-standby) to_standby; status ;;
+  to-primary) to_primary; status ;;
+  rehearse) rehearse ;;
+  shred-key) shred_key ;;
+  *) sed -n 2,16p "$0"; exit 2 ;;
+esac

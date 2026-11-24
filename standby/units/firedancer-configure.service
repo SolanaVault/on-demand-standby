@@ -1,0 +1,14 @@
+[Unit]
+Description=Firedancer host configuration (fd-standby)
+After=local-fs.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=@LED_MNT@ @ACC_MNT@
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/default/firedancer
+ExecStart=/opt/firedancer/bin/firedancer configure init $FD_CONFIGURE_STAGES --config ${FD_CONFIG}
+
+[Install]
+WantedBy=multi-user.target

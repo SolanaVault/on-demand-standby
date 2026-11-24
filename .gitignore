@@ -1,0 +1,5 @@
+# never commit secrets or state
+*.token
+*api-key*
+*.json
+state/

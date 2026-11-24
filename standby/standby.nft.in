@@ -1,0 +1,39 @@
+#!/usr/sbin/nft -f
+# Firedancer standby firewall (socket provider: all traffic via netfilter).
+flush ruleset
+
+table inet filter {
+  set fd_udp {
+    type inet_service
+    elements = { 8001, 8003, 8701, 8702, 9001, 9007, 9006, 8004, 8005 }
+  }
+
+  chain raw_prerouting {
+    type filter hook prerouting priority raw; policy accept;
+    udp dport @fd_udp notrack
+  }
+
+  chain raw_output {
+    type filter hook output priority raw; policy accept;
+    udp sport @fd_udp notrack
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state invalid drop
+    ct state established,related accept
+    iif "lo" accept
+    meta l4proto { icmp, ipv6-icmp } accept
+    ip saddr { @SSH_SOURCES@ } tcp dport 22 accept comment "SSH from primary only"
+    tcp dport 8001 accept comment "gossip ip-echo"
+    udp dport @fd_udp accept comment "Firedancer UDP"
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}

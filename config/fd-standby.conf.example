@@ -1,0 +1,67 @@
+# fd-standby configuration. Copy to /etc/fd-standby/fd-standby.conf (root:root 0600) and edit.
+# This file is sourced by bash: KEY=value, no spaces around '='.
+
+# ---------------------------------------------------------------- your validator
+# Public key of the STAKED validator identity (the one that votes).
+STAKED_PUBKEY=
+# Vote account public key (used only for status/verification via public RPC).
+VOTE_PUBKEY=
+# Firedancer config of the PRIMARY (this machine). Its [paths] identity_key must be a
+# JUNK (unstaked) key: the primary always starts unstaked and only becomes staked via
+# `fd-standby-swap` or by an explicit `firedancer set-identity`.
+PRIMARY_FD_CONFIG=/etc/firedancer/mainnet.toml
+# The staked identity keypair on the PRIMARY (root 0600). Copied to the standby only
+# during a swap and shredded there afterwards.
+PRIMARY_STAKED_KEY=/etc/firedancer/keys/staked-identity.json
+# Firedancer binary on the primary (its exact build is shipped to the standby).
+FD_BIN=/opt/firedancer/bin/firedancer
+# systemd unit that runs Firedancer on the primary.
+FD_UNIT=firedancer.service
+
+# ---------------------------------------------------------------- providers
+# Cherry Servers (https://api.cherryservers.com): API token file and project id.
+CHERRY_TOKEN_FILE=/etc/fd-standby/cherry-api-token
+CHERRY_PROJECT_ID=
+# OS image slugs to try, in order (binary needs glibc >= the primary's build requirement).
+CHERRY_IMAGES="ubuntu_26_04_64bit ubuntu_24_04_64bit"
+# Vultr (experimental, see README): API key file. Leave the file absent to disable.
+VULTR_KEY_FILE=/etc/fd-standby/vultr-api-key
+VULTR_OS_IDS="2760 2284"
+
+# Candidate server types (provider plan region qualified). Shipped list: config/candidates.conf
+CANDIDATES_FILE=/etc/fd-standby/candidates.conf
+# Never rent anything more expensive than this per hour (provider currency, EUR on Cherry).
+MAX_PRICE_PER_HOUR=3.0
+# Vultr bills in USD; converted with this factor for the price cap.
+USD_TO_EUR=0.92
+
+# ---------------------------------------------------------------- standby
+# SSH key used to reach standbys (created by `fd-standby doctor --fix` if missing).
+SSH_KEY=/root/.ssh/id_ed25519_fd_standby
+# Firedancer `configure` stages on the standby (must exist in your Firedancer version;
+# network stages are not needed because the standby uses the socket provider).
+STANDBY_CONFIGURE_STAGES="hugetlbfs sysctl irq-affinity irq-balance kworkers cpuset console snapshots"
+# Extra SSH sources allowed on the standby firewall besides this primary's public IP (CIDR list, comma separated).
+STANDBY_EXTRA_SSH_SOURCES=
+# Drop these shred destinations on the standby (e.g. DoubleZero multicast); default: all multicast.
+STANDBY_DROP_MULTICAST=1
+
+# ---------------------------------------------------------------- timing / safety
+# Give up on a server that is not delivered within this many seconds (then try the next candidate).
+DELIVERY_MAX_S=2700
+# Max time for a standby / the primary to catch up after start.
+CATCHUP_MAX_S=3600
+# Lag threshold (slots) vs public RPC for "caught up" before a swap. Firedancer's
+# replay_reset_slot tracks the finalized slot, normally 5-20 behind the RPC tip.
+SWAP_MAX_LAG=30
+# Watchdog: alert on standbys older than ALERT_AFTER_H, delete unstaked ones older than DELETE_AFTER_H.
+WATCHDOG_ALERT_AFTER_H=3
+WATCHDOG_DELETE_AFTER_H=6
+# Public RPC endpoints for cluster slot / vote account checks (first that answers wins).
+PUBLIC_RPCS="https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com"
+
+# ---------------------------------------------------------------- alerting
+# Command run with the alert text as its only argument. Examples:
+#   ALERT_CMD="logger -t fd-standby"
+#   ALERT_CMD="/usr/local/bin/my-telegram-alert"
+ALERT_CMD="logger -t fd-standby"

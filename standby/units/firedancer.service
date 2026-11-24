@@ -1,0 +1,29 @@
+[Unit]
+Description=Firedancer validator (fd-standby)
+After=firedancer-configure.service network-online.target
+Requires=firedancer-configure.service
+Wants=network-online.target
+RequiresMountsFor=@LED_MNT@ @ACC_MNT@
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/firedancer
+# Firedancer starts as root, configures the host, then sandboxes each tile and drops to [user].
+User=root
+# Return gigantic pages held by stale workspace files of a crashed start (otherwise ENOMEM loops).
+ExecStartPre=-/opt/firedancer/bin/firedancer configure fini hugetlbfs --config ${FD_CONFIG}
+ExecStartPre=/opt/firedancer/bin/firedancer configure init $FD_CONFIGURE_STAGES --config ${FD_CONFIG}
+ExecStart=/opt/firedancer/bin/firedancer run --config ${FD_CONFIG}
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+# Keeps the cpuset controller enabled across systemd daemon-reloads, so Firedancer's isolated
+# CPU partition survives. Set to all CPUs of the box by standby-init.sh.
+AllowedCPUs=@ALL_CPUS@
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
