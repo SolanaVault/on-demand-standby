@@ -24,6 +24,8 @@ CHERRY_TOKEN_FILE=/etc/fd-standby/cherry-api-token
 CHERRY_PROJECT_ID=
 # OS image slugs to try, in order (binary needs glibc >= the primary's build requirement).
 CHERRY_IMAGES="ubuntu_26_04_64bit ubuntu_24_04_64bit"
+# 2-disk plans (< 2 TB per disk) are ordered with this OS partition size so the rest can hold data.
+CHERRY_OS_PARTITION_GB=50
 # Vultr (experimental, see README): API key file. Leave the file absent to disable.
 VULTR_KEY_FILE=/etc/fd-standby/vultr-api-key
 VULTR_OS_IDS="2760 2284"
@@ -36,7 +38,7 @@ MAX_PRICE_PER_HOUR=3.0
 USD_TO_EUR=0.92
 
 # ---------------------------------------------------------------- standby
-# SSH key used to reach standbys (created by `fd-standby doctor --fix` if missing).
+# SSH key used to reach standbys (created by install.sh if missing).
 SSH_KEY=/root/.ssh/id_ed25519_fd_standby
 # Firedancer `configure` stages on the standby (must exist in your Firedancer version;
 # network stages are not needed because the standby uses the socket provider).

@@ -103,6 +103,7 @@ cleanup_orphans(){ local since=$1 prov id ip created known; known=$(state_get id
   while read -r prov id ip created <&3; do
     [[ "$created" =~ ^[0-9]+$ ]] || continue
     (( created >= since - 60 )) && [ "$id" != "$known" ] || continue
+    if valid_ip "$ip" && ! safe_to_delete "$ip" </dev/null; then alert "possible orphan $prov $id ($ip) not deleted: cannot prove it is not voting"; continue; fi
     say "orphan from a failed create: $prov $id ($ip) -> deleting"; destroy_verified "$prov" "$id" </dev/null
   done 3< <(list_tagged); }
 # identity of a standby: staked | junk | other | unknown (unknown = SSH/CLI failure, NEVER "not staked")
@@ -115,7 +116,7 @@ standby_state(){ local ip=$1 id junk
 safe_to_delete(){ local ip=$1 st
   [ "$(p_id)" = "$STAKED_PUBKEY" ] && return 0
   valid_ip "$ip" || return 1
-  st=$(standby_state "$ip"); [ "$st" = junk ] || [ "$st" = other ]; }
+  st=$(standby_state "$ip"); [ "$st" = junk ]; }
 
 # ------------------------------------------------------------------ up / down
 up(){
@@ -157,9 +158,10 @@ up(){
     if ! init --check-only | grep '^RESULT {"ok":true' >/dev/null; then
       say "hardware check failed on $plan -> deleting, next candidate"; destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"; continue; fi
     # firewall FIRST, then confirm it with a NEW login right away (the box rolls it back after 3 min otherwise)
-    init --firewall | grep -E '^\[|^RESULT' >&2
+    init --firewall | grep -E '^\[|^RESULT' | tee >(cat >&2) | grep '^RESULT {"ok":true' >/dev/null \
+      || { say "firewall stage failed -> deleting, next candidate"; destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"; continue; }
     sshs "$ip" "touch /run/fd-standby-fw-ok" </dev/null || die "cannot SSH after loading the firewall (it rolls back in 3 min); server $prov $id left for inspection"
-    init --setup | grep -E '^\[|^RESULT' | tee /dev/stderr | grep '^RESULT {"ok":true' >/dev/null \
+    init --setup | grep -E '^\[|^RESULT' | tee >(cat >&2) | grep '^RESULT {"ok":true' >/dev/null \
       || die "standby setup failed on $ip (left for inspection: fd-standby down)"
     say "waiting for the standby to catch up"
     local w=0
@@ -178,7 +180,7 @@ down(){
   if ! safe_to_delete "$ip"; then
     [ "${FORCE:-0}" = 1 ] || die "standby $ip may hold the staked identity (state: $(standby_state "$ip")) and this primary is not staked - refusing. Fix first (fd-standby-swap status $ip), or --force"
     alert "FORCED delete of standby $ip in state $(standby_state "$ip")"; fi
-  if valid_ip "$ip"; then sshs "$ip" "shred -u /run/fd-standby/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || say "note: could not verify key removal on $ip (it is in tmpfs and dies with the server)"; fi
+  if valid_ip "$ip"; then sshs "$ip" "shred -u /run/fd-standby/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || alert "could not verify key removal on $ip before deletion (tmpfs, dies with the server)"; fi
   destroy_verified "$prov" "$id" || die "server $id not confirmed gone (state file kept)"
   say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$FDS_STATE"
 }
@@ -192,16 +194,19 @@ status(){
 
 # ------------------------------------------------------------------ maintain
 wait_primary_caught_up(){  # since epoch $1, standby IP $2 (must keep voting meanwhile)
-  local since; since=$(date -u -d "@$1" '+%F %T'); local warned=0
+  local since st last=staked; since=$(date -u -d "@$1" '+%F %T')
   for _ in $(seq 1 $((CATCHUP_MAX_S/15))); do
-    if [ "$(standby_state "$2")" != staked ] && ((warned==0)); then
-      alert "standby $2 no longer reports the staked identity during maintenance ($(standby_state "$2")) - CHECK: maybe nobody votes"; warned=1; fi
+    st=$(standby_state "$2"); [ "$st" = unknown ] && { sleep 3; st=$(standby_state "$2"); }
+    if [ "$st" != "$last" ]; then
+      [ "$st" = staked ] && say "standby $2 reports the staked identity again" \
+        || alert "standby $2 now reports '$st' during maintenance (was '$last') - CHECK: maybe nobody votes"
+      last=$st; fi
     systemctl is-active --quiet "$FD_UNIT" && awk -v s="$since" '$2" "substr($3,1,8)>=s' "$P_LOG" | grep 'caught up to cluster' >/dev/null && return 0
     sleep 15; done; return 1
 }
-# run fd-standby-swap; retry ONLY while it reports "refused, nothing changed" (exit 2)
+# run fd-standby-swap; retry ONLY while it reports "refused, nothing changed" (exit 20)
 swap_retry(){ local n=$1 rc; shift
-  for _ in $(seq 1 "$n"); do "$SWAP" "$@" --yes --verify=30 </dev/null; rc=$?; [ $rc = 2 ] || return $rc; sleep 20; done; return 2; }
+  for _ in $(seq 1 "$n"); do "$SWAP" "$@" --yes --verify=30 </dev/null; rc=$?; [ $rc = 20 ] || return $rc; sleep 20; done; return 20; }
 maintain(){
   local cmd=("$@"); [ ${#cmd[@]} -gt 0 ] || cmd=(systemctl restart "$FD_UNIT")
   say "MAINTAIN: primary command: ${cmd[*]}"
@@ -212,12 +217,12 @@ maintain(){
   swap_retry 6 to-standby "$ip"; rc=$?
   case $rc in
     0) ;;
-    2) down; die "swap to standby refused repeatedly - nothing changed, standby deleted";;
+    20) down; die "swap to standby refused repeatedly - nothing changed, standby deleted";;
     *) die "swap to standby INCOMPLETE (see alert for the actual state) - nothing deleted, check manually";;
   esac
   local t pid0; t=$(date +%s); pid0=$(systemctl show -p MainPID --value "$FD_UNIT")
   say "running on primary: ${cmd[*]}"
-  "${cmd[@]}" </dev/null || die "maintenance command failed; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
+  env -u FDS_LOCK_HELD "${cmd[@]}" </dev/null 9>&- || die "maintenance command failed; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
   if [ "$(systemctl show -p MainPID --value "$FD_UNIT")" = "$pid0" ]; then say "Firedancer was not restarted by the command - no catch-up wait"
   else wait_primary_caught_up "$t" "$ip" || die "primary did not catch up; the staked identity stays on standby $ip (voting: $(standby_state "$ip"))"
     say "primary caught up after $(( ($(date +%s)-t)/60 )) min"; fi
@@ -264,7 +269,10 @@ qualify_queue(){
 
 # ------------------------------------------------------------------ watchdog
 watchdog(){
-  local now prov id ip created age st; now=$(date +%s)
+  local now prov id ip created age st tagged; now=$(date +%s)
+  tagged=$(list_tagged) || alert "watchdog: provider listing failed - cannot see standbys"
+  if [ -s "$FDS_STATE" ] && valid_ip "$(state_get ip)" && [ "$(p_id)" != "$STAKED_PUBKEY" ] && [ "$(standby_state "$(state_get ip)")" != staked ]; then
+    alert "watchdog: NEITHER the primary nor standby $(state_get ip) reports the staked identity"; fi
   while read -r prov id ip created <&3; do
     [[ "$created" =~ ^[0-9]+$ ]] || { alert "watchdog: cannot read age of $prov $id"; continue; }
     age=$(( (now-created)/3600 ))
@@ -275,7 +283,7 @@ watchdog(){
       alert "standby $prov $id ($ip) is ${age} h old, state $st, NOT deleting (it may be voting)"; continue; fi
     alert "watchdog deleting forgotten standby $prov $id ($ip) after ${age} h"
     destroy_verified "$prov" "$id" </dev/null && { [ "$(state_get id)" = "$id" ] && rm -f "$FDS_STATE"; }
-  done 3< <(list_tagged)
+  done 3<<< "$tagged"
 }
 
 # ------------------------------------------------------------------ doctor (changes nothing)
@@ -321,7 +329,10 @@ esac
 fds_load_config
 case "$CMD" in
   up|down|maintain|qualify|qualify-queue|bundle) fds_lock_or_exit ;;
-  watchdog) [ "${FDS_LOCK_HELD:-0}" = 1 ] || { exec 9>"$FDS_STATE_DIR/lock"; flock -n 9 || exit 0; export FDS_LOCK_HELD=1; } ;;
+  watchdog) exec 9>>"$FDS_STATE_DIR/lock"
+            if ! flock -n 9; then   # an operation runs; only complain if it runs suspiciously long
+              (( $(date +%s) - $(stat -c %Y "$FDS_STATE_DIR/lock") > 3*3600 )) && alert "fd-standby lock held for more than 3 h - check for a stuck operation"
+              exit 0; fi; export FDS_LOCK_HELD=1 ;;
 esac
 case "$CMD" in
   doctor) doctor ;;

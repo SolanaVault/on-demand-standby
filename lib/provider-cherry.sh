@@ -40,10 +40,20 @@ for p in json.load(sys.stdin):
 }
 
 cherry_create(){
-  local plan=$1 region=$2 host=$3 kid img r id
+  local plan=$1 region=$2 host=$3 kid img r id part=""
   kid=$(cherry_sshkey_id); [ -n "$kid" ] || { say "cherry: cannot register SSH key"; return; }
+  # Plans with exactly two disks < 2 TB: by default Cherry puts the OS RAID1 over both whole disks,
+  # leaving no room for data. Ask for a small OS partition instead; standby-init.sh then adds a
+  # data partition in the unallocated space behind it (documented create field os_partition_size).
+  if curl -s -m 30 "$CH_API/plans" | python3 -I -c 'import json,sys
+plan=sys.argv[1]
+for p in json.load(sys.stdin):
+    if p["slug"]==plan:
+        st=p["specs"]["storage"]; n=sum(s["count"] for s in st)
+        sys.exit(0 if n==2 and all(s.get("size",0)<2000 for s in st) else 1)
+sys.exit(1)' "$plan"; then part=",\"os_partition_size\":${CHERRY_OS_PARTITION_GB:-50}"; say "cherry: 2-disk plan -> OS partition ${CHERRY_OS_PARTITION_GB:-50} GB"; fi
   for img in $CHERRY_IMAGES; do
-    r=$(ch -X POST "$CH_API/projects/$CHERRY_PROJECT_ID/servers" -d "{\"plan\":\"$plan\",\"region\":\"$region\",\"image\":\"$img\",\"hostname\":\"$host\",\"ssh_keys\":[\"$kid\"],\"spot_market\":false,\"cycle\":\"hourly\",\"tags\":{\"role\":\"fd-standby\"}}")
+    r=$(ch -X POST "$CH_API/projects/$CHERRY_PROJECT_ID/servers" -d "{\"plan\":\"$plan\",\"region\":\"$region\",\"image\":\"$img\",\"hostname\":\"$host\",\"ssh_keys\":[\"$kid\"],\"spot_market\":false,\"cycle\":\"hourly\"$part,\"tags\":{\"role\":\"fd-standby\",\"owner\":\"$FDS_OWNER_TAG\"}}")
     id=$(echo "$r" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
     [ -n "$id" ] && { echo "$id"; return; }
     say "cherry create ($img) failed: $(echo "$r" | head -c 300)"
@@ -62,10 +72,12 @@ cherry_destroy(){ ch -X DELETE -o /dev/null -w '%{http_code}' "$CH_API/servers/$
 
 cherry_list_tagged(){
   ch "$CH_API/projects/$CHERRY_PROJECT_ID/servers" | python3 -I -c 'import json,sys,datetime
+owner=sys.argv[1]
 for s in json.load(sys.stdin):
-    if (s.get("tags") or {}).get("role")=="fd-standby":
+    t=s.get("tags") or {}
+    if t.get("role")=="fd-standby" and t.get("owner")==owner:   # only OUR standbys
         ip=[i["address"] for i in s.get("ip_addresses",[]) if i["type"]=="primary-ip"]
         c=s.get("created_at")   # missing while a server is still deploying: treat as brand new
         t=int(datetime.datetime.fromisoformat(c).timestamp()) if c else int(datetime.datetime.now().timestamp())
-        print("cherry", s["id"], ip[0] if ip else "-", t)'
+        print("cherry", s["id"], ip[0] if ip else "-", t)' "$FDS_OWNER_TAG"
 }

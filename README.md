@@ -82,6 +82,9 @@ Adding a provider = one file `lib/provider-NAME.sh` implementing six functions
 **Standby (rented):** chosen and verified automatically: ≥48 threads, ≥240 GiB RAM, the CPU
 features your binary needs, ≥900 GB + 500 GB free disk, Ubuntu with glibc ≥ 2.38. The OS disks are
 never touched; data disks are found by "whole disk, no partitions, no signature, not mounted".
+Plans with only two disks (< 2 TB each) are ordered with a 50 GB OS partition
+(`CHERRY_OS_PARTITION_GB`); the setup then *adds* one data partition in the unallocated space
+behind the existing partitions (GPT only, table backed up first) and never modifies existing ones.
 
 ## Quick start
 

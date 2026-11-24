@@ -7,9 +7,10 @@
 #   fd-standby-swap rehearse   HOST        standby only, throwaway keys: junk -> rehearsal key -> junk
 #   fd-standby-swap shred-key  HOST        remove any staked key copy from the standby
 #
-# Exit codes: 0 done | 2 refused, NOTHING was changed (safe to retry) |
-#             3 identities changed and the swap could not be completed: the script restored what
-#               it could and printed/alerted the ACTUAL state. Do NOT retry blindly.
+# Exit codes: 0 done | 20 refused, NOTHING was changed (safe to retry) |
+#             21 identities changed and the swap could not be completed: the script restored what
+#                it could and printed/alerted the ACTUAL state. Do NOT retry blindly.
+#             (anything else, e.g. 2 = usage/bash error: treat like 21 and check manually)
 #
 # Safety rules (SAFETY.md):
 #  - a node's identity is one of: staked | junk (its own known junk pubkey) | other | unknown.
@@ -30,8 +31,10 @@ for a in "$@"; do case "$a" in --dry-run) DRY=1;; --yes) YES=1;; --verify=*) VER
 [ -n "$CMD" ] && [ -n "$HOST" ] || { sed -n 2,21p "$0"; exit 2; }
 valid_ip "$HOST" || { echo "not an IPv4 address: $HOST"; exit 2; }
 [[ "$VERIFY" =~ ^[0-9]+$ ]] || { echo "bad --verify"; exit 2; }
-fds_lock_or_exit      # one fd-standby operation at a time (shared with fd-standby)
+case "$CMD" in status) ;; *) fds_lock_or_exit ;; esac   # one mutating operation at a time
 exec > >(tee -a "$FDS_STATE_DIR/swap.log") 2>&1
+EX_REFUSED=20; EX_CHANGED=21
+SETID_TIMEOUT=60          # every set-identity runs under timeout -s KILL (no late, in-flight switches)
 
 FDU=${P_USER:-firedancer}
 S_KEYDIR=$(dirname "$S_STAKED_KEY")
@@ -39,8 +42,9 @@ VH_FILE=vote_history-$STAKED_PUBKEY.bin
 VH_BAK=$VH_FILE.bak          # written by Firedancer when it switches AWAY from the staked key
 
 ok(){ printf '  OK %s\n' "$*"; }
-refuse(){ say "REFUSED (nothing changed): $*"; alert "swap refused (nothing changed): $*"; exit 2; }
+refuse(){ say "REFUSED (nothing changed): $*"; alert "swap refused (nothing changed): $*"; exit $EX_REFUSED; }
 run(){ if ((DRY)); then printf '  DRY-RUN would run:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+# all questions are asked BEFORE the first identity change; afterwards nothing waits for a human
 confirm(){ ((YES||DRY)) && return 0; read -r -p "  >>> $* [yes/NO] " a </dev/tty; [ "$a" = yes ] || refuse "not confirmed"; }
 sb(){ sshs "$HOST" "$@" </dev/null; }
 q(){ printf '%q' "$1"; }
@@ -48,9 +52,10 @@ q(){ printf '%q' "$1"; }
 # ------------------------------------------------------------------ identity state (3-way)
 P_JUNK_PUB=$(keypub_local "$P_JUNK_KEY")
 S_JUNK_PUB=""; S_REH_PUB=""
-s_junk_pub(){ [ -n "$S_JUNK_PUB" ] || S_JUNK_PUB=$(keypub_remote "$HOST" "$S_JUNK_KEY" </dev/null); echo "$S_JUNK_PUB"; }
+for _ in 1 2 3; do S_JUNK_PUB=$(keypub_remote "$HOST" "$S_JUNK_KEY" </dev/null); [[ "$S_JUNK_PUB" =~ ^$B58$ ]] && break; S_JUNK_PUB=""; sleep 2; done
+s_junk_pub(){ echo "$S_JUNK_PUB"; }
 classify(){ local id=$1 junk=$2 reh=${3:-}
-  if ! [[ "$id" =~ ^$B58$ ]]; then echo unknown
+  if ! [[ "$id" =~ ^$B58$ ]] || ! [[ "$junk" =~ ^$B58$ ]]; then echo unknown
   elif [ "$id" = "$STAKED_PUBKEY" ]; then echo staked
   elif [ -n "$junk" ] && [ "$id" = "$junk" ]; then echo junk
   elif [ -n "$reh" ] && [ "$id" = "$reh" ]; then echo rehearsal
@@ -59,6 +64,8 @@ p_state(){ classify "$(p_id)" "$P_JUNK_PUB"; }
 s_state(){ classify "$(s_id "$HOST" </dev/null)" "$(s_junk_pub)" "$S_REH_PUB"; }
 # read a state until it is not "unknown" (transient SSH/CLI failures), max 3 tries
 stable(){ local f=$1 st; for _ in 1 2 3; do st=$($f); [ "$st" != unknown ] && { echo "$st"; return; }; sleep 2; done; echo unknown; }
+# "junk" proven by 3 consistent reads over ~10 s (a late in-flight switch would show up)
+settled_junk(){ local f=$1; for _ in 1 2 3; do [ "$($f)" = junk ] || return 1; sleep 5; done; [ "$($f)" = junk ]; }
 actual_state(){ echo "primary=$(stable p_state)($(p_id)) standby=$(stable s_state)($(s_id "$HOST" </dev/null))"; }
 changed(){  # identities were touched and the swap is not complete: report the ACTUAL state, exit 3
   local st; st=$(actual_state)
@@ -68,15 +75,24 @@ changed(){  # identities were touched and the swap is not complete: report the A
     *primary=staked*|*standby=staked*) alert "swap incomplete but one node votes: $st ($*)";;
     *) alert "NOBODY IS VOTING ($st) after: $* - restore manually: fd-standby-swap status $HOST";;
   esac
-  exit 3; }
+  exit $EX_CHANGED; }
+
+p_setid(){ (cd /tmp && timeout -s KILL $SETID_TIMEOUT "$FD_BIN" set-identity --config "$PRIMARY_FD_CONFIG" "$@"); }
+s_setid(){ local a="" x; for x in "$@"; do a+=" $(q "$x")"; done
+  sb "cd /tmp && timeout -s KILL $SETID_TIMEOUT $S_FD_BIN set-identity --config $S_FD_CFG$a"; }
+# no set-identity may still be running on the other node before we restore (else it could land late)
+p_no_setid(){ pkill -KILL -f "firedancer set-identity --config $PRIMARY_FD_CONFIG" 2>/dev/null; sleep 1; ! pgrep -f "firedancer set-identity --config $PRIMARY_FD_CONFIG" >/dev/null; }
+s_no_setid(){ sb "pkill -KILL -f 'firedancer set-identity' 2>/dev/null; sleep 1; ! pgrep -f 'firedancer set-identity' >/dev/null"; }
+s_pid(){ sb "systemctl show -p MainPID --value firedancer"; }
+p_pid(){ systemctl show -p MainPID --value "$FD_UNIT"; }
 
 # ------------------------------------------------------------------ metrics / lag
 p_metric(){ p_metrics | metric "$1"; }
 s_metric(){ s_metrics "$HOST" </dev/null | metric "$1"; }
 p_slot(){ local v; v=$(p_metric replay_reset_slot); echo "${v%.*}"; }
 s_slot(){ local v; v=$(s_metric replay_reset_slot); echo "${v%.*}"; }
-p_lag(){ lag_of "$(p_slot)" "$(s_slot)"; }
-s_lag(){ lag_of "$(s_slot)" "$(p_slot)"; }
+p_lag(){ lag_of "$(p_slot)"; }
+s_lag(){ lag_of "$(s_slot)"; }
 
 # ------------------------------------------------------------------ standby key handling (tmpfs)
 s_key_present(){ sb "test -e $(q "$S_STAKED_KEY")"; }
@@ -84,7 +100,7 @@ s_shred_key(){  # shred key + temp files in the tmpfs key dir; verify; never sil
   sb "shred -u $(q "$S_KEYDIR")/* 2>/dev/null; test ! -e $(q "$S_STAKED_KEY")" && return 0
   alert "could not verify that the staked key was removed from standby $HOST"; return 1; }
 push_key(){
-  sb "mountpoint -q /run && install -d -m 700 $(q "$S_KEYDIR")" || return 1
+  sb "[ \"\$(findmnt -no FSTYPE /run)\" = tmpfs ] && [ -z \"\$(swapon --noheadings 2>/dev/null)\" ] && install -d -m 700 $(q "$S_KEYDIR")" || return 1
   sshs "$HOST" "umask 077; cat > $(q "$S_STAKED_KEY").tmp && mv $(q "$S_STAKED_KEY").tmp $(q "$S_STAKED_KEY")" < "$PRIMARY_STAKED_KEY" || return 1
   [ "$(keypub_remote "$HOST" "$S_STAKED_KEY" </dev/null)" = "$STAKED_PUBKEY" ]
 }
@@ -96,22 +112,27 @@ standby_firewall_ok(){ sb "nft list ruleset 2>/dev/null | grep -c 'fd-standby: S
 # vote-history files: votor renames its "spare" (the .bak of the identity it last left) BY NAME
 # on the next switch and dies (FD_LOG_ERR) if it is missing (fd_votor_tile.c, v26.10.8).
 p_bak_fresh(){ [ -s "$P_VH_DIR/$VH_BAK" ] && [ "$(stat -c %Y "$P_VH_DIR/$VH_BAK")" -ge "$1" ]; }
-s_bak_fresh(){ sb "f=$(q "$S_VH_DIR/$VH_BAK"); [ -s \"\$f\" ] && [ \$(stat -c %Y \"\$f\") -ge $1 ]"; }
+s_bak_fresh(){ sb "f=$(q "$S_VH_DIR/$VH_BAK"); [ -s \"\$f\" ] && [ \$(stat -c %Y \"\$f\") -ge $1 ]"; }   # \$1 = standby clock
 wait_fresh(){ local f=$1 t=$2; for _ in 1 2 3 4 5 6 7 8 9 10; do $f "$t" && return 0; sleep 1; done; return 1; }
 
 # ------------------------------------------------------------------ restore helpers (positive checks only)
-restore_primary(){  # standby must POSITIVELY be junk; primary gets its own fresh history back
-  [ "$(stable s_state)" = junk ] || { say "standby not positively junk - NOT restoring primary"; return 1; }
+restore_primary(){  # $1 = switch start (primary clock), $2 = standby MainPID before the switch
+  s_no_setid || { say "cannot prove no set-identity is running on the standby - NOT restoring primary"; return 1; }
+  [ "$(s_pid)" = "$2" ] || { say "standby Firedancer restarted - it may have voted - NOT restoring primary"; return 1; }
+  settled_junk s_state || { say "standby not settled on its junk key - NOT restoring primary"; return 1; }
   p_bak_fresh "$1" || { say "primary vote history not fresh - NOT restoring automatically"; return 1; }
+  s_shred_key >/dev/null 2>&1
   local f; f=$P_VH_DIR/vh-restore-$(date +%s).bin
   cp -p "$P_VH_DIR/$VH_BAK" "$f" && chown "$FDU:$FDU" "$f" || return 1
-  (cd /tmp && "$FD_BIN" set-identity --config "$PRIMARY_FD_CONFIG" --vote-history-file "$f" "$PRIMARY_STAKED_KEY") || return 1
+  p_setid --vote-history-file "$f" "$PRIMARY_STAKED_KEY"
   [ "$(stable p_state)" = staked ] && say "primary restored to staked"
 }
-restore_standby(){  # primary must POSITIVELY be junk
-  [ "$(stable p_state)" = junk ] || { say "primary not positively junk - NOT restoring standby"; return 1; }
+restore_standby(){  # $1 = switch start (STANDBY clock), $2 = primary MainPID before the switch
+  p_no_setid || { say "cannot prove no set-identity is running on the primary - NOT restoring standby"; return 1; }
+  [ "$(p_pid)" = "$2" ] || { say "primary Firedancer restarted - it may have voted - NOT restoring standby"; return 1; }
+  settled_junk p_state || { say "primary not settled on its junk key - NOT restoring standby"; return 1; }
   s_bak_fresh "$1" || { say "standby vote history not fresh - NOT restoring automatically"; return 1; }
-  sb "f=$(q "$S_VH_DIR")/vh-restore-\$(date +%s).bin; cp -p $(q "$S_VH_DIR/$VH_BAK") \"\$f\" && chown $FDU:$FDU \"\$f\" && cd /tmp && $S_FD_BIN set-identity --config $S_FD_CFG --vote-history-file \"\$f\" $(q "$S_STAKED_KEY")" || return 1
+  sb "f=$(q "$S_VH_DIR")/vh-restore-\$(date +%s).bin; cp -p $(q "$S_VH_DIR/$VH_BAK") \"\$f\" && chown $FDU:$FDU \"\$f\" && cd /tmp && timeout -s KILL $SETID_TIMEOUT $S_FD_BIN set-identity --config $S_FD_CFG --vote-history-file \"\$f\" $(q "$S_STAKED_KEY")" || return 1
   [ "$(stable s_state)" = staked ] && say "standby restored to staked"
 }
 
@@ -127,7 +148,7 @@ precheck(){
   systemctl is-active --quiet "$FD_UNIT" || refuse "primary $FD_UNIT not running"
   [ "$(sb systemctl is-active firedancer)" = active ] || refuse "standby firedancer not running"
   [ -n "$P_JUNK_PUB" ] && [ "$P_JUNK_PUB" != "$STAKED_PUBKEY" ] || refuse "primary junk key unreadable or staked"
-  [ -n "$(s_junk_pub)" ] && [ "$(s_junk_pub)" != "$STAKED_PUBKEY" ] || refuse "standby junk key unreadable or staked"
+  [[ "$S_JUNK_PUB" =~ ^$B58$ ]] && [ "$S_JUNK_PUB" != "$STAKED_PUBKEY" ] || refuse "standby junk key unreadable or staked"
   # lag vs public RPC jitters 5-20 slots (replay_reset_slot = finalized); best of 5
   local pl=999999 sl=999999 x d=999999 a b
   for _ in 1 2 3 4 5; do x=$(p_lag); ((x<pl)) && pl=$x; x=$(s_lag); ((x<sl)) && sl=$x; sleep 2; done
@@ -149,49 +170,38 @@ to_standby(){
   standby_firewall_ok || refuse "standby firewall not active - will not send the staked key"
   [ "$(keypub_local "$PRIMARY_STAKED_KEY")" = "$STAKED_PUBKEY" ] || refuse "primary staked key file does not match STAKED_PUBKEY"
   ok "primary=staked, standby=junk, standby firewall active"
+  confirm "move the STAKED identity to $HOST now (key copy, primary -> junk, standby -> staked)?"
+  ((DRY)) && { echo "  DRY-RUN: push key to $S_STAKED_KEY, firedancer wait, primary -> junk, copy fresh $VH_BAK, standby -> staked"; return 0; }
 
-  say "1/6 push staked key to standby tmpfs ($S_STAKED_KEY)"
-  confirm "copy the STAKED keypair to $HOST?"
-  if ((!DRY)); then push_key || { s_shred_key; refuse "key push/verify failed"; }; ok "standby has the staked key"; fi
-  # until the standby is verified staked, any exit must remove the key copy again
-  ((DRY)) || trap 's_shred_key >/dev/null 2>&1' EXIT
+  say "1/5 push staked key to standby tmpfs ($S_STAKED_KEY)"
+  push_key || { s_shred_key; refuse "key push/verify failed (or /run not tmpfs / swap active)"; }
+  ok "standby has the staked key"
+  trap 's_shred_key >/dev/null 2>&1' EXIT          # until the standby is verified staked
 
-  say "2/6 primary: wait for a safe window"
-  confirm "run firedancer wait on primary?"
-  run bash -c "cd /tmp && timeout 900 $(q "$FD_BIN") wait --config $(q "$PRIMARY_FD_CONFIG")" || refuse "firedancer wait failed"
+  say "2/5 primary: wait for a safe window"
+  (cd /tmp && timeout 900 "$FD_BIN" wait --config "$PRIMARY_FD_CONFIG") || refuse "firedancer wait failed"
 
-  say "3/6 primary: switch to junk (voting stops)"
-  confirm "switch PRIMARY to junk now?"
-  local t0 t; t0=$(date +%s.%N); t=$(date +%s)
-  run bash -c "cd /tmp && $(q "$FD_BIN") set-identity --config $(q "$PRIMARY_FD_CONFIG") $(q "$P_JUNK_KEY")"
-  if ((!DRY)); then
-    [ "$(stable p_state)" = junk ] || changed "primary did not reach its junk key"
-    ok "primary now junk ($P_JUNK_PUB)"
-  fi
+  say "3/5 primary: switch to junk (voting stops)"
+  local t0 t spid; t0=$(date +%s.%N); t=$(date +%s); spid=$(s_pid)
+  trap 'changed "interrupted during to-standby"' INT TERM HUP
+  p_setid "$P_JUNK_KEY"
+  [ "$(stable p_state)" = junk ] || changed "primary did not reach its junk key"
+  ok "primary now junk ($P_JUNK_PUB)"
 
-  say "4/6 copy the fresh vote history primary -> standby"
+  say "4/5 copy the fresh vote history primary -> standby"
   local dst=$S_VH_DIR/vote_history-$STAKED_PUBKEY.from-peer.bin
-  if ((!DRY)); then
-    wait_fresh p_bak_fresh "$t" || { restore_primary "$t" || true; changed "no fresh $VH_BAK on primary"; }
-    sshs "$HOST" "cat > $(q "$dst").tmp && mv $(q "$dst").tmp $(q "$dst") && chown $FDU:$FDU $(q "$dst")" < "$P_VH_DIR/$VH_BAK" \
-      || { restore_primary "$t" || true; changed "vote history copy failed"; }
-  fi
+  wait_fresh p_bak_fresh "$t" || changed "no fresh $VH_BAK on primary (not restoring: history unclear)"
+  sshs "$HOST" "cat > $(q "$dst").tmp && mv $(q "$dst").tmp $(q "$dst") && chown $FDU:$FDU $(q "$dst")" < "$P_VH_DIR/$VH_BAK" \
+    || { restore_primary "$t" "$spid" || true; changed "vote history copy failed"; }
 
-  say "5/6 standby: switch to STAKED with the primary's vote history"
-  confirm "switch STANDBY to $STAKED_PUBKEY now?"
-  if ((!DRY)); then
-    [ "$(stable p_state)" = junk ] || changed "SAFETY: primary not positively junk before staking the standby"
-    sb "cd /tmp && $S_FD_BIN set-identity --config $S_FD_CFG --vote-history-file $(q "$dst") $(q "$S_STAKED_KEY")"
-    if [ "$(stable s_state)" != staked ]; then
-      # the switch may or may not have happened; only restore the primary if the standby is POSITIVELY junk
-      restore_primary "$t" || true; changed "standby did not reach the staked identity"
-    fi
-    trap - EXIT          # committed: the standby votes and needs the key until hand-back
-    echo "  voting gap ~$(python3 -c "import time,sys;print('%.1f s'%(time.time()-float(sys.argv[1])))" "$t0")"
+  say "5/5 standby: switch to STAKED with the primary's vote history"
+  [ "$(stable p_state)" = junk ] || changed "SAFETY: primary not positively junk before staking the standby"
+  s_setid --vote-history-file "$dst" "$S_STAKED_KEY"
+  if [ "$(stable s_state)" != staked ]; then
+    restore_primary "$t" "$spid" || true; changed "standby did not reach the staked identity"
   fi
-
-  say "6/6 verify"
-  ((DRY)) && return 0
+  trap - EXIT INT TERM HUP     # committed: the standby votes and keeps the key (tmpfs) until hand-back
+  echo "  voting gap ~$(python3 -c "import time,sys;print('%.1f s'%(time.time()-float(sys.argv[1])))" "$t0")"
   ok "standby runs $STAKED_PUBKEY"
   for i in $(seq 1 $((VERIFY/10))); do sleep 10; echo "  t+$((i*10))s standby=$(stable s_state) rank=$(s_metric votor_rank) bam=$(s_metric bam_healthy) vote=[$(vote_state)]"; done
 }
@@ -204,41 +214,34 @@ to_primary(){
   [ "$(stable p_state)" = junk ] || refuse "primary is not positively on its junk key ($(p_id))"
   [ "$(keypub_local "$PRIMARY_STAKED_KEY")" = "$STAKED_PUBKEY" ] || refuse "primary staked key file missing/mismatch"
   ok "standby=staked, primary=junk"
+  confirm "move the STAKED identity back to this primary now (standby -> junk, primary -> staked)?"
+  ((DRY)) && { echo "  DRY-RUN: firedancer wait on standby, standby -> junk, copy fresh $VH_BAK, primary -> staked, shred standby key"; return 0; }
 
-  say "1/5 standby: wait for a safe window"
-  confirm "run firedancer wait on standby?"
-  run sb "cd /tmp && timeout 900 $S_FD_BIN wait --config $S_FD_CFG" || refuse "firedancer wait failed"
+  say "1/4 standby: wait for a safe window"
+  sb "cd /tmp && timeout 900 $S_FD_BIN wait --config $S_FD_CFG" || refuse "firedancer wait failed"
 
-  say "2/5 standby: switch to junk (voting stops)"
-  confirm "switch STANDBY to junk now?"
-  local t0 t; t0=$(date +%s.%N); t=$(date +%s)
-  run sb "cd /tmp && $S_FD_BIN set-identity --config $S_FD_CFG $(q "$S_JUNK_KEY")"
-  if ((!DRY)); then
-    [ "$(stable s_state)" = junk ] || changed "standby did not reach its junk key"
-    ok "standby now junk"
-  fi
+  say "2/4 standby: switch to junk (voting stops)"
+  local t0 ts ppid; t0=$(date +%s.%N); ts=$(sb "date +%s"); ppid=$(p_pid)
+  [[ "$ts" =~ ^[0-9]+$ ]] || refuse "cannot read the standby clock"
+  trap 'changed "interrupted during to-primary"' INT TERM HUP
+  s_setid "$S_JUNK_KEY"
+  [ "$(stable s_state)" = junk ] || changed "standby did not reach its junk key"
+  ok "standby now junk"
 
-  say "3/5 copy the fresh vote history standby -> primary"
+  say "3/4 copy the fresh vote history standby -> primary"
   local dst=$P_VH_DIR/vote_history-$STAKED_PUBKEY.from-peer.bin
-  if ((!DRY)); then
-    wait_fresh s_bak_fresh "$t" || { restore_standby "$t" || true; changed "no fresh $VH_BAK on standby"; }
-    { sb "cat $(q "$S_VH_DIR/$VH_BAK")" > "$dst.tmp" && [ -s "$dst.tmp" ] && mv "$dst.tmp" "$dst" && chown "$FDU:$FDU" "$dst"; } \
-      || { restore_standby "$t" || true; changed "vote history copy failed"; }
-  fi
+  wait_fresh s_bak_fresh "$ts" || changed "no fresh $VH_BAK on standby (not restoring: history unclear)"
+  { sb "cat $(q "$S_VH_DIR/$VH_BAK")" > "$dst.tmp" && [ -s "$dst.tmp" ] && mv "$dst.tmp" "$dst" && chown "$FDU:$FDU" "$dst"; } \
+    || { restore_standby "$ts" "$ppid" || true; changed "vote history copy failed"; }
 
-  say "4/5 primary: switch to STAKED"
-  confirm "switch PRIMARY to $STAKED_PUBKEY now?"
-  if ((!DRY)); then
-    [ "$(stable s_state)" = junk ] || changed "SAFETY: standby not positively junk before staking the primary"
-    (cd /tmp && "$FD_BIN" set-identity --config "$PRIMARY_FD_CONFIG" --vote-history-file "$dst" "$PRIMARY_STAKED_KEY")
-    if [ "$(stable p_state)" != staked ]; then
-      restore_standby "$t" || true; changed "primary did not reach the staked identity"
-    fi
-    echo "  voting gap ~$(python3 -c "import time,sys;print('%.1f s'%(time.time()-float(sys.argv[1])))" "$t0")"
+  say "4/4 primary: switch to STAKED"
+  [ "$(stable s_state)" = junk ] || changed "SAFETY: standby not positively junk before staking the primary"
+  p_setid --vote-history-file "$dst" "$PRIMARY_STAKED_KEY"
+  if [ "$(stable p_state)" != staked ]; then
+    restore_standby "$ts" "$ppid" || true; changed "primary did not reach the staked identity"
   fi
-
-  say "5/5 remove the staked key from the standby + verify"
-  ((DRY)) && return 0
+  trap - INT TERM HUP
+  echo "  voting gap ~$(python3 -c "import time,sys;print('%.1f s'%(time.time()-float(sys.argv[1])))" "$t0")"
   s_shred_key && ok "standby key shredded (verified)"
   for i in $(seq 1 $((VERIFY/10))); do sleep 10; echo "  t+$((i*10))s primary=$(stable p_state) rank=$(p_metric votor_rank) bam=$(p_metric bam_healthy) vote=[$(vote_state)]"; done
 }
@@ -254,11 +257,11 @@ rehearse(){
   [[ "$S_REH_PUB" =~ ^$B58$ ]] && [ "$S_REH_PUB" != "$STAKED_PUBKEY" ] || refuse "rehearsal key unusable"
   local t0; t0=$(date +%s.%N)
   sb "cd /tmp && timeout 900 $S_FD_BIN wait --config $S_FD_CFG | tail -1"
-  sb "cd /tmp && $S_FD_BIN set-identity --config $S_FD_CFG $(q "$j2")"
+  s_setid "$j2"
   [ "$(stable s_state)" = rehearsal ] || changed "rehearsal switch not verified"
   echo "  switched to the rehearsal key in $(python3 -c "import time,sys;print('%.1f s'%(time.time()-float(sys.argv[1])))" "$t0") (incl. wait)"
   sleep 10
-  sb "cd /tmp && $S_FD_BIN set-identity --config $S_FD_CFG $(q "$S_JUNK_KEY")"
+  s_setid "$S_JUNK_KEY"
   [ "$(stable s_state)" = junk ] || changed "rehearsal: switch back to junk not verified"
   ok "rehearsal OK (back on junk, lag $(s_lag))"
 }

@@ -34,6 +34,8 @@ fds_load_config(){
   [[ "$STAKED_PUBKEY" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || { echo "STAKED_PUBKEY is not a base58 pubkey" >&2; exit 2; }
   [[ "$SWAP_MAX_LAG" =~ ^[0-9]+$ && "$DELIVERY_MAX_S" =~ ^[0-9]+$ && "$CATCHUP_MAX_S" =~ ^[0-9]+$ ]] || { echo "numeric settings must be integers" >&2; exit 2; }
   fds_primary_info
+  FDS_OWNER_TAG=fds-${STAKED_PUBKEY:0:12}   # provider tag: which validator a standby belongs to
+  [[ "$P_METRICS_PORT" =~ ^[0-9]+$ ]] || { echo "bad prometheus port in $PRIMARY_FD_CONFIG" >&2; exit 2; }
   [[ "$P_NAME" =~ ^[A-Za-z0-9_.-]+$ && "${P_USER:-firedancer}" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "unsupported Firedancer name/user in $PRIMARY_FD_CONFIG" >&2; exit 2; }
 }
 
@@ -45,7 +47,7 @@ fds_lock_or_exit(){
   [ "${FDS_LOCK_HELD:-0}" = 1 ] && return 0
   exec 9>"$FDS_STATE_DIR/lock"
   flock -n 9 || { echo "another fd-standby operation is running (lock $FDS_STATE_DIR/lock)" >&2; exit 75; }
-  export FDS_LOCK_HELD=1
+  touch "$FDS_STATE_DIR/lock"; export FDS_LOCK_HELD=1
 }
 
 say(){ printf '[%s] %s\n' "$(date -u +%T)" "$*" | tee -a "$FDS_LOG" >&2; }
@@ -80,8 +82,9 @@ PY
 primary_ip(){ ip -o route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'; }
 
 # --- SSH to the standby
-sshs(){ local h=$1; shift; ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FDS_KNOWN_HOSTS" "root@$h" "$@"; }
-SSHOPT_STR() { echo "-i $SSH_KEY -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$FDS_KNOWN_HOSTS"; }
+# ServerAlive*: a silently dead link fails within ~15 s instead of blocking for hours.
+sshs(){ local h=$1; shift; ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FDS_KNOWN_HOSTS" "root@$h" "$@"; }
 
 # --- public RPC
 rpc_call(){  # method [params-json] -> result JSON on stdout, empty on failure
@@ -106,16 +109,17 @@ metric(){ awk -v m="$1" '$1 ~ "^"m {print $2; exit}'; }
 p_metrics(){ curl -s -m 3 "127.0.0.1:$P_METRICS_PORT/metrics"; }
 s_metrics(){ sshs "$1" "curl -s -m 3 127.0.0.1:$P_METRICS_PORT/metrics"; }
 B58='[1-9A-HJ-NP-Za-km-z]{32,44}'
-p_id(){ (cd /tmp && "$FD_BIN" get-identity --config "$PRIMARY_FD_CONFIG" 2>/dev/null | grep -Eo "$B58" | tail -1); }
-s_id(){ sshs "$1" "cd /tmp && $S_FD_BIN get-identity --config $S_FD_CFG 2>/dev/null" | grep -Eo "$B58" | tail -1; }
+# get-identity must exit 0 and its LAST line must be exactly one base58 pubkey; anything else = "" (unknown)
+_last_pubkey(){ local out rc; out=$("$@"); rc=$?; ((rc==0)) || return 0; out=$(printf '%s\n' "$out" | tail -1 | tr -d '[:space:]'); [[ "$out" =~ ^$B58$ ]] && echo "$out"; return 0; }
+p_id(){ (cd /tmp && _last_pubkey timeout 20 "$FD_BIN" get-identity --config "$PRIMARY_FD_CONFIG" 2>/dev/null); }
+s_id(){ _last_pubkey sshs "$1" "cd /tmp && timeout 20 $S_FD_BIN get-identity --config $S_FD_CFG 2>/dev/null"; }
 keypub_local(){ (cd /tmp && "$FD_BIN" keys pubkey "$1" --config "$PRIMARY_FD_CONFIG" 2>/dev/null | tail -1); }
 keypub_remote(){ sshs "$1" "cd /tmp && $S_FD_BIN keys pubkey $2 --config $S_FD_CFG 2>/dev/null" | tail -1; }
 slot_of(){ local v; v=$(metric replay_reset_slot); echo "${v%.*}"; }
 
-# lag = reference - local, reference = public cluster slot, or the other node's slot when
-# the RPC is unavailable. 999999 = unknown (fails every check).
-lag_of(){ local mine=$1 other=$2 c
-  c=$(cluster_slot) || c=$other
+# lag = public cluster slot - local slot. 999999 = unknown (fails every check).
+lag_of(){ local mine=$1 c
+  c=$(cluster_slot) || { echo 999999; return; }     # no public reference = cannot prove "caught up"
   [[ "$mine" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ ]] || { echo 999999; return; }
   local d=$((c-mine)); ((d<-50)) && d=999999; ((d<0)) && d=0; echo $d; }
 

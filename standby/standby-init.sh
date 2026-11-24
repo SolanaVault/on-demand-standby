@@ -31,6 +31,7 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg $1"; exit 2;; esac; done
 [[ "$PRIMARY_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "need --primary-ip IPv4"; exit 2; }
 [[ -z "$EXTRA_SSH" || "$EXTRA_SSH" =~ ^[0-9./,\ ]+$ ]] || { echo "bad --extra-ssh (IPv4/CIDR list)"; exit 2; }
+for c in ${EXTRA_SSH//,/ }; do [[ "$c" != */* || "${c#*/}" -ge 8 ]] || { echo "--extra-ssh $c is too broad (/8 minimum)"; exit 2; }; done
 [ -n "$MODE" ] || { echo "need --check-only, --firewall or --setup"; exit 2; }
 
 # Minimums (from the FireBAM v26.10.8 mainnet config: 164 GiB locked, 55 tiles on 48 threads)
@@ -68,18 +69,40 @@ ACC_MNT=/mnt/fd-accounts; LED_MNT=/mnt/fd-ledger
 if findmnt -n "$ACC_MNT" >/dev/null && findmnt -n "$LED_MNT" >/dev/null; then
   LAYOUT=existing
 else
-  # candidates: JSON list of free whole disks, largest first
+  # candidates (largest first):
+  #  - whole disks: no partitions, no filesystem/RAID/LVM signature, not mounted
+  #  - "free:" regions: unallocated space AFTER the last partition of a GPT disk (e.g. the OS disks
+  #    of 2-disk plans ordered with a small OS partition). Existing partitions are never touched.
   CANDS=$(lsblk -J -b -o NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL,ROTA | python3 -I -c '
-import json,sys,subprocess
+import json,sys,subprocess,re
 d=json.load(sys.stdin)["blockdevices"]
 out=[]
+def free_region(disk):
+    dump=subprocess.run(["sfdisk","-d",disk],capture_output=True,text=True)
+    if dump.returncode!=0 or not re.search(r"^label: gpt$",dump.stdout,re.M): return None
+    ss=int((re.search(r"^sector-size: (\d+)$",dump.stdout,re.M) or [0,512])[1])
+    ends=[int(a)+int(b) for a,b in re.findall(r"start=\s*(\d+), size=\s*(\d+)",dump.stdout)]
+    if not ends: return None
+    fr=subprocess.run(["sfdisk","-F",disk],capture_output=True,text=True)
+    if fr.returncode!=0: return None
+    best=None
+    for st,en,n in re.findall(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+\S+\s*$",fr.stdout,re.M):
+        st,n=int(st),int(n)
+        if st>=max(ends) and (best is None or n>best[1]): best=(st,n)
+    if best and best[1]*ss>=200*10**9:
+        return {"path":"free:%s:%d:%d"%(disk,best[0],best[1]),"size_gb":best[1]*ss//10**9,"kind":"free"}
+    return None
 for b in d:
-    if b["type"]!="disk" or b.get("children"): continue           # partitioned / in use
+    if b["type"]!="disk": continue
+    if b.get("children"):
+        r=free_region(b["path"])
+        if r: out.append(r)
+        continue
     if b.get("fstype") or any(m for m in (b.get("mountpoints") or []) if m): continue
     if b["size"] < 200*10**9: continue
     w=subprocess.run(["wipefs","-n",b["path"]],capture_output=True,text=True)
     if w.returncode!=0 or w.stdout.strip(): continue                # error or any signature = not empty
-    out.append({"path":b["path"],"size_gb":b["size"]//10**9,"model":(b.get("model") or "").strip(),"serial":b.get("serial"),"rota":b.get("rota")})
+    out.append({"path":b["path"],"size_gb":b["size"]//10**9,"kind":"disk","model":(b.get("model") or "").strip(),"serial":b.get("serial")})
 out.sort(key=lambda x:-x["size_gb"])
 print(json.dumps(out))')
   log "free disks: $CANDS"
@@ -87,13 +110,13 @@ print(json.dumps(out))')
   n=$(echo "$CANDS" | python3 -I -c 'import json,sys;print(len(json.load(sys.stdin)))')
   big(){ echo "$CANDS" | python3 -I -c "import json,sys;l=json.load(sys.stdin);print(l[$1]['$2'])"; }
   if [ "$n" -ge 2 ] && [ "$(big 0 size_gb)" -ge $MIN_ACCOUNTS_GB ] && [ "$(big 1 size_gb)" -ge $MIN_LEDGER_GB ]; then
-    LAYOUT=two-disks; ACC_DEV=$(big 0 path); LED_DEV=$(big 1 path)
+    LAYOUT="two-disks"; ACC_DEV=$(big 0 path); LED_DEV=$(big 1 path)
   elif [ "$n" -ge 1 ] && [ "$(big 0 size_gb)" -ge $((MIN_ACCOUNTS_GB+MIN_LEDGER_GB)) ]; then
-    LAYOUT=one-disk; ACC_DEV=$(big 0 path); LED_DEV=""
+    LAYOUT="one-disk"; ACC_DEV=$(big 0 path); LED_DEV=""
   elif [ "$n" -ge 1 ] && [ "$(big 0 size_gb)" -ge $MIN_ACCOUNTS_GB ] && [ "$ROOT_FREE_GB" -ge $MIN_LEDGER_GB ]; then
-    LAYOUT=disk-plus-root; ACC_DEV=$(big 0 path); LED_DEV=""
+    LAYOUT="disk-plus-root"; ACC_DEV=$(big 0 path); LED_DEV=""
   elif [ "$ROOT_FREE_GB" -ge $((MIN_ACCOUNTS_GB+MIN_LEDGER_GB)) ]; then
-    LAYOUT=root-only; ACC_DEV=""; LED_DEV=""
+    LAYOUT="root-only"; ACC_DEV=""; LED_DEV=""
   else
     fail "not enough disk: free disks=$CANDS root_free=${ROOT_FREE_GB}GB (need ${MIN_ACCOUNTS_GB}+${MIN_LEDGER_GB} GB)"
   fi
@@ -121,9 +144,24 @@ if [ "$MODE" = firewall ]; then
 fi
 [ -e /run/fd-standby-fw-ok ] && fw_active || fail "firewall not confirmed/active - run --firewall and confirm first"
 id "$FD_USER" >/dev/null 2>&1 || useradd -r -m -d "/home/$FD_USER" -s /usr/sbin/nologin "$FD_USER"
+# the staked key will live in /run (tmpfs): no swap, so it can never be paged to disk
+swapoff -a; sed -i -E 's@^([^#].*\sswap\s.*)$@# fd-standby: \1@' /etc/fstab
 
 # ------------------------------------------------------------------ 6. disks
-mkfs_label(){ local dev=$1 label=$2; blkid "$dev" >/dev/null 2>&1 && { echo "refusing: $dev has a signature"; exit 1; }; mkfs.xfs -q -L "$label" "$dev"; }
+# "free:DISK:START:SECTORS" -> append ONE partition exactly there, print its device path
+make_part(){ local disk start sectors line part
+  IFS=: read -r _ disk start sectors <<< "$1"
+  sfdisk -F "$disk" | grep -Eq "^\s*$start\s+[0-9]+\s+$sectors\s" || fail "free region on $disk changed - not partitioning"
+  sfdisk -d "$disk" > "/root/fd-standby-sfdisk-$(basename "$disk").before"          # backup of the table
+  echo "start=$start, size=$sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4" | sfdisk --append --no-reread -q "$disk" >/dev/null \
+    || fail "sfdisk --append failed on $disk"
+  partx -a "$disk" 2>/dev/null || true; udevadm settle
+  line=$(sfdisk -d "$disk" | grep -E "start=\s*$start,") || fail "new partition on $disk not found"
+  part=${line%% *}; [ -b "$part" ] || fail "new partition $part has no device node"
+  log "created $part in free space of $disk (table backup in /root)"; echo "$part"; }
+mkfs_label(){ local dev=$1 label=$2
+  [[ "$dev" == free:* ]] && dev=$(make_part "$dev")
+  blkid "$dev" >/dev/null 2>&1 && { echo "refusing: $dev has a signature"; exit 1; }; mkfs.xfs -q -L "$label" "$dev"; }
 fstab(){ grep -q "LABEL=$1 " /etc/fstab || echo "LABEL=$1 $2 xfs noatime,nofail 0 0" >> /etc/fstab; }
 case "$LAYOUT" in
   existing) ;;
@@ -157,8 +195,8 @@ sed -e "s#@IFACE@#$IFACE#" config/standby.toml.in > /etc/firedancer/standby.toml
 printf "FD_CONFIG=/etc/firedancer/standby.toml\nFD_CONFIGURE_STAGES=%s\n" "$CONFIGURE_STAGES" > /etc/default/firedancer
 install -m 644 60-fd-tcp-rmem.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-fd-tcp-rmem.conf
 J=/home/$FD_USER/standby-identity.json
-if [ ! -e $J ]; then (cd /tmp && rm -f identity && /opt/firedancer/bin/firedancer keys new identity --config /etc/firedancer/standby.toml >/dev/null 2>&1); install -m 600 -o "$FD_USER" -g "$FD_USER" /tmp/identity "$J"; shred -u /tmp/identity; fi
-JUNK=$(cd /tmp && /opt/firedancer/bin/firedancer keys pubkey $J --config /etc/firedancer/standby.toml 2>/dev/null | tail -1)
+if [ ! -e "$J" ]; then (cd /tmp && rm -f identity && /opt/firedancer/bin/firedancer keys new identity --config /etc/firedancer/standby.toml >/dev/null 2>&1); install -m 600 -o "$FD_USER" -g "$FD_USER" /tmp/identity "$J"; shred -u /tmp/identity; fi
+JUNK=$(cd /tmp && /opt/firedancer/bin/firedancer keys pubkey "$J" --config /etc/firedancer/standby.toml 2>/dev/null | tail -1)
 (cd /tmp && /opt/firedancer/bin/firedancer mem --config /etc/firedancer/standby.toml >/tmp/fd-mem.txt 2>&1) || fail "firedancer mem rejects the config"
 log "identity (junk): $JUNK | $(grep -E 'Total Memory Locked' /tmp/fd-mem.txt | xargs)"
 

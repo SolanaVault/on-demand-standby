@@ -31,8 +31,14 @@ how the tooling prevents that, what it was tested against, and where the remaini
    Unknown = refuse and alert.
 8. **One operation at a time.** All mutating commands share a lock; the watchdog skips while it is
    held; `qualify` refuses while a standby exists.
-9. **Retry only what changed nothing.** `fd-standby-swap` exits 2 for "refused, nothing changed"
-   (safe to retry) and 3 for "identities changed, swap incomplete" (never retried automatically).
+9. **Retry only what changed nothing.** `fd-standby-swap` exits 20 for "refused, nothing changed"
+   (safe to retry) and 21 for "identities changed, swap incomplete" (never retried automatically).
+   All questions are asked before the first identity change; Ctrl-C/SIGHUP afterwards reports the
+   actual state instead of exiting silently.
+10. **No late switches.** Every `set-identity` runs under `timeout -s KILL`. Before an automatic
+    restore, the other node must have no `set-identity` process left, the same Firedancer process
+    as before the switch (no restart = no votes of its own), and report its junk key on three
+    reads over ~10 s. SSH uses keepalives, so a silently dead link fails within ~15 s.
 
 ## Lessons that are built in (each one was a real failure)
 
@@ -66,9 +72,10 @@ how the tooling prevents that, what it was tested against, and where the remaini
 | Standby does not catch up | abort before any swap; standby left for inspection (`fd-standby down`), watchdog deletes it after 6 h |
 | Rehearsal on standby fails | abort before any swap |
 | Swap to standby fails before the primary went to junk | abort, primary still votes, standby deleted |
-| Swap fails after the primary went to junk | automatic rollback to the primary |
+| Swap fails after the primary went to junk | automatic restore of the primary **only** if all restore conditions hold (invariant 10); otherwise alert "NOBODY IS VOTING" with the actual state |
 | Maintenance command fails / primary does not catch up | **standby keeps voting**, alert, nothing deleted — fix the primary, then `fd-standby-swap to-primary HOST` |
-| Swap back fails | automatic rollback to the standby, alert, standby stays |
+| Swap back fails | automatic restore of the standby under the same conditions, alert, standby stays |
+| No fresh vote-history file after the switch | no automatic restore (history unclear), alert with actual state |
 
 Typical voting gap per switch measured on mainnet: 3.4–3.8 s (script overhead included), plus
 `firedancer wait` beforehand so no own leader slot is close.
