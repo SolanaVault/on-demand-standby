@@ -83,8 +83,14 @@ primary_ip(){ ip -o route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src"){p
 
 # --- SSH to the standby
 # ServerAlive*: a silently dead link fails within ~15 s instead of blocking for hours.
+# Providers reuse IP addresses, so host keys are pinned PER SERVER (provider+id from the state
+# file), never per IP: the first login to a newly delivered server records its key, every later
+# login to that same server must match it.
+known_hosts_for(){ local h=$1
+  if [ -s "$FDS_STATE" ] && [ "$(state_get ip)" = "$h" ]; then echo "$FDS_STATE_DIR/known_hosts.$(state_get provider)-$(state_get id)"
+  else echo "$FDS_KNOWN_HOSTS"; fi; }
 sshs(){ local h=$1; shift; ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
-  -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$FDS_KNOWN_HOSTS" "root@$h" "$@"; }
+  -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(known_hosts_for "$h")" "root@$h" "$@"; }
 
 # --- public RPC
 rpc_call(){  # method [params-json] -> result JSON on stdout, empty on failure

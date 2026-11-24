@@ -182,6 +182,7 @@ down(){
     alert "FORCED delete of standby $ip in state $(standby_state "$ip")"; fi
   if valid_ip "$ip"; then sshs "$ip" "shred -u /run/fd-standby/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || alert "could not verify key removal on $ip before deletion (tmpfs, dies with the server)"; fi
   destroy_verified "$prov" "$id" || die "server $id not confirmed gone (state file kept)"
+  rm -f "$FDS_STATE_DIR/known_hosts.$prov-$id"
   say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$FDS_STATE"
 }
 
