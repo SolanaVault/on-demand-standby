@@ -1,0 +1,35 @@
+#!/usr/sbin/nft -f
+# Agave standby firewall. @PORT_RANGE@ = the validator's --dynamic-port-range (gossip, TVU,
+# repair, TPU/QUIC, ...); RPC stays on 127.0.0.1.
+flush ruleset
+
+table inet filter {
+  chain raw_prerouting {
+    type filter hook prerouting priority raw; policy accept;
+    udp dport @PORT_RANGE@ notrack
+  }
+
+  chain raw_output {
+    type filter hook output priority raw; policy accept;
+    udp sport @PORT_RANGE@ notrack
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state invalid drop
+    ct state established,related accept
+    iif "lo" accept
+    meta l4proto { icmp, ipv6-icmp } accept
+    ip saddr { @SSH_SOURCES@ } tcp dport 22 accept comment "fd-standby: SSH from primary only"
+    tcp dport @PORT_RANGE@ accept comment "gossip ip-echo and TCP services"
+    udp dport @PORT_RANGE@ accept comment "Agave UDP/QUIC"
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}

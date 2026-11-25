@@ -1,6 +1,6 @@
 # on-demand-standby
 
-**Zero-downtime maintenance for a single Firedancer validator, with a standby you rent by the hour.**
+**Zero-downtime maintenance for a single Firedancer or Agave validator, with a standby you rent by the hour.**
 
 Commands: `fd-standby`, `fd-standby-swap`. A community tool, not affiliated with Jump Crypto, the Firedancer project, Jito or any server provider.
 
@@ -53,7 +53,8 @@ Failback always returns to the machine `failover` was run on. Moving to a *new* 
 automated yet (set up the new box, then `fd-standby-swap` from it — open an issue if you need this).
 
 > **Status: early but real.** Developed and run against mainnet with FireBAM (Jito's Firedancer fork)
-> v26.10.8 under Alpenglow, on one validator so far. Every server type listed as qualified below was actually rented,
+> v26.10.8 under Alpenglow, on one validator so far. **Agave primaries are new and not yet proven
+> end to end** (see "Agave primary" below). Every server type listed as qualified below was actually rented,
 > set up, caught up and swapped. Read [SAFETY.md](SAFETY.md) before using it on a staked validator.
 
 ## Qualified servers
@@ -95,7 +96,7 @@ Adding a provider = one file `lib/provider-NAME.sh` implementing six functions
 
 ## Requirements
 
-**Primary (your validator):**
+**Primary (your validator):** Firedancer (below) or Agave (see [Agave primary](#agave-primary)).
 - Firedancer (full Firedancer, not Frankendancer). Tested with FireBAM v26.10.8 on Ubuntu 26.04.
   fd-standby does not care how you run it (systemd, script, ...); it talks to it with
   `firedancer get-identity / set-identity / wait` using your config file. Let your service manager
@@ -112,6 +113,54 @@ Plans with only two disks (< 2 TB each) are ordered with a 50 GB OS partition
 (`CHERRY_OS_PARTITION_GB`); the setup then *adds* one data partition in the unallocated space
 behind the existing partitions (GPT only, table backed up first) and never modifies existing ones.
 **This 2-disk path is experimental**: no 2-disk plan has been qualified with it yet.
+
+### Agave primary
+
+**Before the first failover** (`doctor` checks both; `failover` and `to-standby` refuse otherwise):
+the validator must be *started* with a junk `--identity` (the staked key is switched in at
+runtime), and it must write a readable `--log` file: a swap confirms in it that votor really
+stopped voting as the old identity before the vote history is copied.
+
+Set `PRIMARY_CLIENT=agave` and the `AGAVE_*` settings in `fd-standby.conf`. By default the standby
+runs **Agave too** (`STANDBY_CLIENT=agave`): your own `agave-validator` build and your own running
+command line, so the vote history never changes client. Developed against Jito-Agave v4.4.0 under
+Alpenglow; every subcommand and flag used was checked against that binary's `--help` and source.
+
+- **Start the validator on a junk identity**: `--identity` must point at a junk keypair (a symlink
+  to one is fine, but nothing may ever point it at the staked key). The staked key lives in a
+  separate root-only file (`PRIMARY_STAKED_KEY`) and is given to the validator at runtime over
+  the admin socket, on stdin (`authorized-voter add`, then `set-identity`). Agave does not vote on a
+  junk identity (votor "hot spare"), so any restart comes back unstaked. Consequence: after a
+  restart *outside* fd-standby you switch to the staked key yourself. `fd-standby doctor` checks
+  what the running process's `--identity` path points to now.
+- **Admin socket**: fd-standby runs as root but calls `agave-validator --ledger <AGAVE_LEDGER> ...`
+  as the owner of `<ledger>/admin.rpc` (the agave CLI cannot use the socket as root).
+- **Local RPC** (`AGAVE_RPC_URL`, default `http://127.0.0.1:8899`): caught-up check (finalized slot).
+- **Safe window**: `wait-for-restart-window --min-idle-time AGAVE_MIN_IDLE_MIN` (minutes; it also
+  requires delinquent stake ≤ 5 % and a healthy node).
+- **Vote history**: Agave reads `<ledger>/vote_history-<pubkey>.bin` (there is no
+  `--vote-history-file`). The incoming file is installed there (the previous one is kept as
+  `….bin.fds-replaced`) and `set-identity` is called without `--do-not-require-vote-history`, so
+  Agave refuses the switch, and changes nothing, if it cannot load it; the swap then restores the
+  previous voter automatically.
+
+**Agave standby** (`bundle` / `standby/standby-init.sh`): ships `agave-validator` + `solana-keygen`
+from your install and derives the standby command line from your *running* validator:
+identity/vote-account keypairs, all paths, public addresses, port range, `--no-snapshot-fetch`
+and multicast shred receivers (DoubleZero) are removed, the standby layout, a junk `--identity`
+and `--vote-account <VOTE_PUBKEY>` are added. `fd-standby doctor` prints the result. Anything it
+cannot place (another path flag, this host's IP) stops the bundle: list it in
+`STANDBY_AGAVE_DROP_ARGS`, add replacements with `STANDBY_AGAVE_EXTRA_ARGS`. Programs that run
+next to the validator against its ledger (e.g. Harmonic's `harmonic-scheduler` with Salsa 4.x)
+are found automatically and run on the standby too, same binary and arguments
+(`STANDBY_AGAVE_COMPANIONS`). Snapshots: see "Snapshots". On the standby every node operation runs
+through `fds-node`, which uses the same code (`lib/primary-agave.sh`) as the primary.
+Server types are qualified per client: an Agave standby uses `candidates-agave.conf` (all `no` at
+first, ≥ 360 GiB RAM by default): run `fd-standby qualify` before the first failover.
+
+A Firedancer standby for an Agave primary also works (`STANDBY_CLIENT=firedancer`,
+`STANDBY_FD_BIN`, `STANDBY_FD_TEMPLATE`, see `config/standby-firedancer.toml.example`; FireBAM
+if you use Jito BAM), but then the vote history crosses clients; Firedancer → Agave is unproven.
 
 ## Quick start
 
@@ -133,17 +182,34 @@ Other commands: `status`, `up`, `down`, `qualify PROVIDER PLAN REGION`, `qualify
 ## How it works
 
 - **Bundle.** Every run ships the primary's *current* Firedancer binary and a standby config
-  derived from the primary's *current* config (throwaway identity, standby paths, socket network
+  derived from the primary's *current* config (Agave standby: the primary's agave build and
+  running command line, see "Agave primary") (throwaway identity, standby paths, socket network
   provider, multicast destinations such as DoubleZero dropped). Upgrades on the primary carry over
   automatically.
 - **Standby setup** (`standby/standby-init.sh`): hardware check → firewall first (SSH only from
   the primary; automatic rollback unless a new login works) → data disks by discovery, labelled
   and mounted by label → Firedancer, sysctl, CPU governor, units → start, wait until caught up.
-- **Swap** (`bin/fd-standby-swap`): `firedancer wait` for a safe window → old voter to junk →
-  copy its vote history → new voter `set-identity --vote-history-file` with the staked key. Before
-  every staked switch the other node must report a non-staked identity.
+- **Swap** (`bin/fd-standby-swap`): wait for a safe window → old voter to junk →
+  copy its vote history → new voter `set-identity` with that history and the staked key. Before
+  every staked switch the other node must report a non-staked identity. Everything client-specific
+  lives in `lib/primary-*.sh` (this machine) and `lib/standby-*.sh` (the rented one).
 - **Watchdog** (systemd timer): alerts on standbys older than 3 h, deletes unstaked ones older
   than 6 h, never deletes one that is voting.
+
+## The standby mirrors the primary
+
+Whatever block-building setup the primary runs, the standby runs the same, on both clients:
+Jito block engine, Jito BAM, Harmonic (Salsa / Samba), other shred relays, or none
+of them. Nothing is added and nothing is removed (except multicast destinations such as DoubleZero,
+`STANDBY_DROP_MULTICAST`). Only the *region* changes: during setup the standby pings every region
+of every provider the primary uses and re-points that provider's endpoints (block engine, BAM,
+remote TPU, shred receiver) to the closest one, all from the same region. Scheme, port and path stay
+as configured. The table is `config/regional-endpoints.conf` (sources and dates inside; add
+providers or regions there); pin a region with `STANDBY_REGIONS="jito=frankfurt bam=fra"`. A host
+under a known provider domain that is not in the table is kept and reported by `doctor`/`bundle`.
+Global endpoints (`mainnet.block-engine.jito.wtf`, `mainnet.bam.jito.wtf`) are left alone.
+Services that whitelist validator identities (BAM, Harmonic) see the standby's junk identity until
+the swap; after the swap the standby connects with your staked identity like the primary did.
 
 ## Snapshots
 
@@ -154,7 +220,13 @@ Firedancer gives up after `wait_for_peers_timeout_seconds` (30 s) — the next s
 new full snapshot and works. We hit this once (a restart took 12.6 instead of ~6 minutes). A second
 trusted source in `allow_list` reduces it.
 
-The standby downloads a fresh snapshot on every start. We use
+**Agave standby:** before the first start it downloads the newest full + incremental snapshot from
+the servers in `STANDBY_SNAPSHOT_SOURCES` (default: snappie.sh's gossip identity; its current RPC
+address is looked up in gossip when the bundle is built) and from `STANDBY_SNAPSHOT_URLS`. If your
+command line uses `--known-validator`, the sources are added as known validators, so a later
+self-fetch may use them too. No source answers: the validator fetches its own as configured.
+
+**Firedancer standby:** downloads a fresh snapshot on every start. We use
 [snappie.sh](https://snappie.sh) as the only trusted source
 (`[snapshots.sources.gossip] allow_any = false`, `allow_list = ["snappie..."]` in the primary
 config, which the standby inherits) and raise the TCP receive window
@@ -167,9 +239,10 @@ what may be rented. A forgotten server is deleted by the watchdog after 6 h (if 
 
 ## Privacy note
 
-The standby runs a config derived from your primary's Firedancer config. Anything in that file
-(RPC or snapshot URLs with tokens, BAM/relayer settings) is copied to the rented server for the
-duration of the run. Keep secrets out of the Firedancer TOML.
+The standby runs a config derived from your primary's Firedancer config or Agave command line
+(and its companion programs' command lines). Anything in there (RPC or snapshot URLs with tokens,
+BAM/relayer settings) is copied to the rented server for the duration of the run. Keep secrets
+out of them.
 
 ## Not covered
 
@@ -177,8 +250,7 @@ duration of the run. Keep secrets out of the Firedancer TOML.
   restarts faster on its own (systemd). fd-standby is for planned maintenance.
 - **Hardware loss of the primary.** Use the same tooling to build a replacement, but that is a
   manual decision.
-- **Agave / Frankendancer** primaries (the swap logic relies on Firedancer's `set-identity`,
-  `get-identity`, `wait` and its vote-history file handling).
+- **Frankendancer** primaries, and an Agave standby for a Firedancer primary.
 
 ## License
 

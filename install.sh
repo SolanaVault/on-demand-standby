@@ -10,6 +10,7 @@ for b in curl ssh ssh-keygen tar sha256sum; do command -v $b >/dev/null || { ech
 install -d -m 700 /etc/fd-standby /var/lib/fd-standby
 [ -e /etc/fd-standby/fd-standby.conf ] || { install -m 600 "$SRC/config/fd-standby.conf.example" /etc/fd-standby/fd-standby.conf; echo "created /etc/fd-standby/fd-standby.conf - EDIT IT"; }
 [ -e /etc/fd-standby/candidates.conf ] || { install -m 600 "$SRC/config/candidates.conf" /etc/fd-standby/candidates.conf; echo "created /etc/fd-standby/candidates.conf"; }
+[ -e /etc/fd-standby/candidates-agave.conf ] || { install -m 600 "$SRC/config/candidates-agave.conf" /etc/fd-standby/candidates-agave.conf; echo "created /etc/fd-standby/candidates-agave.conf"; }
 # shellcheck disable=SC1091
 . /etc/fd-standby/fd-standby.conf
 K=${SSH_KEY:-/root/.ssh/id_ed25519_fd_standby}

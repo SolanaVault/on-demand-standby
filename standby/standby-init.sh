@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepare a freshly delivered bare-metal box as a Firedancer STANDBY (junk identity).
+# Prepare a freshly delivered bare-metal box as a Firedancer or Agave STANDBY (junk identity).
 # Runs ON the standby as root, from the unpacked bundle directory. Idempotent.
 #
 #   ./standby-init.sh --primary-ip IP [--private-net CIDR] [--check-only]
@@ -14,7 +14,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck disable=SC1091
-. config/standby.env      # FD_USER, FD_NAME, CONFIGURE_STAGES (written by `fd-standby bundle`)
+. config/standby.env      # CLIENT, FD_USER, FD_NAME, ... (written by `fd-standby bundle`)
+CLIENT=${CLIENT:-firedancer}
+# Regional endpoints (Jito, BAM, Harmonic, ...): the region closest to THIS machine, per provider
+# (config/regional-endpoints.conf). Only endpoints the primary uses are changed; nothing is added.
+localize(){ local fmt=$1; shift
+  python3 -I ./localize-endpoints.py config/regional-endpoints.conf "$fmt" "$@" ${REGIONS:+--force "$REGIONS"} 2>&1 | while read -r l; do log "endpoints: $l"; done
+  return "${PIPESTATUS[0]}"; }
 
 # Stages (run in this order by fd-standby, each in its own SSH call):
 #   --check-only   hardware/disk/network checks, changes nothing
@@ -34,12 +40,14 @@ while [ $# -gt 0 ]; do case "$1" in
 for c in ${EXTRA_SSH//,/ }; do [[ "$c" != */* || "${c#*/}" -ge 8 ]] || { echo "--extra-ssh $c is too broad (/8 minimum)"; exit 2; }; done
 [ -n "$MODE" ] || { echo "need --check-only, --firewall or --setup"; exit 2; }
 
-# Minimums (from the FireBAM v26.10.8 mainnet config: 164 GiB locked, 55 tiles on 48 threads)
+# Minimums. Firedancer: from the FireBAM v26.10.8 mainnet config (164 GiB locked, 55 tiles on 48
+# threads). Agave: MIN_RAM_GIB / REQ_FLAGS / MIN_GLIBC come from the bundle (standby.env).
 MIN_THREADS=48
-MIN_RAM_GIB=240            # 164 GiB hugepages + OS + page cache headroom
+MIN_RAM_GIB=${MIN_RAM_GIB:-240}   # Firedancer: 164 GiB hugepages + OS + page cache headroom
 MIN_ACCOUNTS_GB=900        # accounts.db file is ~584 GB and grows
 MIN_LEDGER_GB=500          # 2 full + 2 incremental snapshots (~280 GB) + shreds (50 GiB) + log
-REQ_FLAGS="avx2 bmi2 adx sha_ni aes vaes vpclmulqdq fma movbe"   # used by the znver3 build
+REQ_FLAGS=${REQ_FLAGS:-"avx2 bmi2 adx sha_ni aes vaes vpclmulqdq fma movbe"}   # Firedancer: used by the znver3 build
+MIN_GLIBC=${MIN_GLIBC:-2.38}
 
 FD_BIN_SRC=bin/firedancer
 log(){ printf '[%s] %s\n' "$(date -u +%T)" "$*"; }
@@ -53,9 +61,9 @@ missing=""; for f in $REQ_FLAGS; do grep -qw "$f" /proc/cpuinfo || missing="$mis
 log "cpu: $cpu | threads=$threads ram=${ram_gib}GiB | kernel $(uname -r) | $(. /etc/os-release; echo $PRETTY_NAME)"
 [ "$threads" -ge $MIN_THREADS ] || fail "only $threads threads (need $MIN_THREADS)"
 [ "$ram_gib" -ge $MIN_RAM_GIB ] || fail "only ${ram_gib} GiB RAM (need $MIN_RAM_GIB)"
-[ -z "$missing" ] || fail "CPU lacks:$missing (binary is built for znver3)"
+[ -z "$missing" ] || fail "CPU lacks:$missing (needed by the $CLIENT build)"
 glibc=$(ldd --version | awk 'NR==1{print $NF}')
-python3 -c "import sys; a=tuple(map(int,'$glibc'.split('.'))); sys.exit(0 if a>=(2,38) else 1)" || fail "glibc $glibc < 2.38"
+python3 -c "import sys; v=lambda x: tuple(map(int,x.split('.'))); sys.exit(0 if v('$glibc')>=v('$MIN_GLIBC') else 1)" || fail "glibc $glibc < $MIN_GLIBC"
 
 # ------------------------------------------------------------------ 2. network discovery
 IFACE=$(ip -o route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
@@ -186,10 +194,107 @@ case "$LAYOUT" in
 esac
 mkdir -p $ACC_MNT $LED_MNT; systemctl daemon-reload; mount -a
 install -d -o "$FD_USER" -g "$FD_USER" -m 750 "$LED_MNT/$FD_NAME"
-install -d -o "$FD_USER" -g "$FD_USER" -m 700 "$LED_MNT/$FD_NAME/snapshots"     # configure stage wants 0700
+[ "$CLIENT" = firedancer ] && install -d -o "$FD_USER" -g "$FD_USER" -m 700 "$LED_MNT/$FD_NAME/snapshots"     # configure stage wants 0700
 chown "$FD_USER:$FD_USER" $ACC_MNT
 ACC_FREE=$(df -B1G --output=avail $ACC_MNT | tail -1 | tr -d ' '); LED_FREE=$(df -B1G --output=avail $LED_MNT | tail -1 | tr -d ' ')
 log "accounts: $(findmnt -no SOURCE $ACC_MNT) ${ACC_FREE}G free | ledger: $(findmnt -no SOURCE $LED_MNT) ${LED_FREE}G free"
+
+if [ "$CLIENT" = agave ]; then
+# ------------------------------------------------------------------ 7a. Agave: binaries, identity, node helper
+AG=/opt/agave; REL=$AG/releases/$(cat bin/release)
+install -d -m 755 "$REL" /etc/agave /opt/fd-standby-node
+install -m 755 bin/agave-validator bin/solana-keygen "$REL/"; ln -sfn "$REL" $AG/active
+# the same file capabilities as on the primary (setcap; a copy loses them)
+setcaps(){ local caps; caps=$(cat "$2" 2>/dev/null) || fail "no capabilities record $2 in the bundle"
+  [ -n "$caps" ] || return 0
+  command -v setcap >/dev/null || apt-get -qq install -y libcap2-bin >/dev/null
+  setcap "$caps" "$1" || fail "setcap $caps $1 failed"
+  [ "$(getcap "$1" | awk '{print $NF}')" = "$caps" ] || fail "file capabilities of $1 are not $caps after setcap"
+  log "file capabilities as on the primary: $(basename "$1") $caps"; }
+setcaps "$REL/agave-validator" bin/agave-validator.caps
+install -d -m 755 "$REL/companions" /etc/agave/companions; rm -f /etc/agave/companions/*.args
+for c in bin/companions/*; do [ -f "$c" ] || continue; [[ "$c" == *.caps ]] && continue
+  n=$(basename "$c"); install -m 755 "$c" "$REL/companions/$n"; install -m 644 "config/companions/$n.args" /etc/agave/companions/
+  setcaps "$REL/companions/$n" "$c.caps"
+  log "companion $n (runs next to the validator, as on the primary)"; done
+ver=$($AG/active/agave-validator --version 2>&1 | head -1 || true)
+[ "$ver" = "$(cat bin/version)" ] || fail "binary version mismatch ($ver vs $(cat bin/version))"
+install -m 755 node/fds-node /opt/fd-standby-node/fds-node
+install -m 644 node/primary-agave.sh node/node.env /opt/fd-standby-node/
+ln -sfn /opt/fd-standby-node/fds-node /usr/local/sbin/fds-node
+install -m 644 60-fd-tcp-rmem.conf 60-agave.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-fd-tcp-rmem.conf -p /etc/sysctl.d/60-agave.conf
+J=/home/$FD_USER/standby-identity.json
+if [ ! -e "$J" ]; then
+  $AG/active/solana-keygen new --no-bip39-passphrase --silent --force -o /root/fds-junk.json >/dev/null
+  install -m 600 -o "$FD_USER" -g "$FD_USER" /root/fds-junk.json "$J"; shred -u /root/fds-junk.json; fi
+JUNK=$($AG/active/solana-keygen pubkey "$J")
+L=$LED_MNT/$FD_NAME
+# the primary's command line (one argument per line), made host-independent by `fd-standby bundle`
+cp config/agave.args /etc/agave/standby.args
+grep -qx -- "--identity" /etc/agave/standby.args && grep -qxF -- "$J" /etc/agave/standby.args || fail "standby.args does not use the junk identity $J"
+shopt -s nullglob; LOC=(/etc/agave/standby.args /etc/agave/companions/*.args); shopt -u nullglob
+localize args "${LOC[@]}" || fail "cannot localize the regional endpoints"
+
+# ------------------------------------------------------------------ 7b. Agave: snapshot
+# From STANDBY_SNAPSHOT_URLS (RPC-style /snapshot.tar.bz2 + /incremental-snapshot.tar.bz2, 303 to
+# the real file), else the validator fetches its own (the primary's --known-validator rules).
+fetch_snap(){ local base=$1 kind=$2 url name
+  url=$(curl -s -m 20 -o /dev/null -w '%{redirect_url}' "$base/$kind.tar.bz2") || return 1
+  name=$(basename "${url%%\?*}")
+  [[ "$name" =~ ^(incremental-)?snapshot-[0-9][0-9A-Za-z-]*\.tar\.(zst|bz2|gz|lz4)$ ]] || return 1
+  # an incremental only applies to ITS full snapshot (incremental-snapshot-<full slot>-<slot>-...):
+  # a server that made a newer full one meanwhile serves an incremental we cannot use
+  if [ "$kind" = incremental-snapshot ]; then local full; full=$(ls "$L"/snapshot-*.tar.* 2>/dev/null | sed -E 's@.*/snapshot-([0-9]+)-.*@\1@' | sort -n | tail -1)
+    [[ "$name" == incremental-snapshot-"$full"-* ]] || { log "incremental $name is not for the full snapshot at slot $full: skipped (the validator catches up from the full one)"; return 1; }; fi
+  [ -e "$L/$name" ] && return 0
+  log "downloading $name from $base"
+  curl -fsS --retry 3 --speed-limit 10000000 --speed-time 60 -o "$L/$name.part" "$url" && mv "$L/$name.part" "$L/$name" && chown "$FD_USER:$FD_USER" "$L/$name"; }
+snap=0
+if ls "$L"/snapshot-*.tar.* >/dev/null 2>&1; then snap=1
+else
+  while read -r u; do
+    [ -n "$u" ] || continue
+    if fetch_snap "$u" snapshot; then snap=1; fetch_snap "$u" incremental-snapshot || log "no incremental from $u (the full one is enough)"; break; fi
+    rm -f "$L"/*.part; log "snapshot download from $u failed"
+  done < config/snapshot-urls
+fi
+if [ $snap = 1 ]; then grep -qx -- --no-snapshot-fetch /etc/agave/standby.args || echo --no-snapshot-fetch >> /etc/agave/standby.args
+else sed -i '/^--no-snapshot-fetch$/d' /etc/agave/standby.args; log "no local snapshot: the validator fetches one itself"; fi
+cat > $AG/standby-validator.sh <<'SH'
+#!/bin/bash
+mapfile -t A < /etc/agave/standby.args
+exec /opt/agave/active/agave-validator "${A[@]}"
+SH
+cat > $AG/companion.sh <<'SH'
+#!/bin/bash
+[[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || exit 2
+mapfile -t A < "/etc/agave/companions/$1.args"
+exec "/opt/agave/active/companions/$1" "${A[@]}"
+SH
+chmod 755 $AG/standby-validator.sh $AG/companion.sh
+log "identity (junk): $JUNK | $ver"
+
+# ------------------------------------------------------------------ 8a. Agave: host tuning + units
+for s in tuned irqbalance; do systemctl disable --now $s >/dev/null 2>&1 || true; done
+install -m 644 units/*.service /etc/systemd/system/
+sed -i -e "s#@ACC_MNT@#$ACC_MNT#g" -e "s#@LED_MNT@#$LED_MNT#g" -e "s#@USER@#$FD_USER#g" /etc/systemd/system/agave-validator.service /etc/systemd/system/agave-companion@.service
+systemctl daemon-reload
+for c in /etc/agave/companions/*.args; do if [ -f "$c" ]; then systemctl enable -q "agave-companion@$(basename "$c" .args).service"; fi; done
+systemctl enable -q --now fd-cpu-governor.service
+systemctl enable -q agave-validator.service
+systemctl reset-failed agave-validator.service 2>/dev/null; systemctl restart agave-validator.service   # a rerun: old failed starts must not hit StartLimitBurst
+sleep 15; systemctl is-active --quiet agave-validator || {
+  # why: the unit's journal and the validator's own log (startup errors land in either)
+  journalctl -u agave-validator -n 25 --no-pager -o cat 2>&1 | sed 's/^/[journal] /'
+  vlog=$(awk 'p{print; exit} $0=="--log"||$0=="-o"{p=1}' /etc/agave/standby.args)
+  [ -n "$vlog" ] && [ -f "$vlog" ] && grep -E ' (ERROR|WARN) |panicked|Error' "$vlog" | tail -n 25 | sed 's/^/[vlog] /'
+  fail "agave-validator did not start"; }
+for c in /etc/agave/companions/*.args; do [ -f "$c" ] || continue
+  systemctl is-active --quiet "agave-companion@$(basename "$c" .args)" || fail "companion $(basename "$c" .args) did not start"; done
+log "agave-validator started"
+echo "RESULT {\"ok\":true,\"client\":\"agave\",\"layout\":\"$LAYOUT\",\"iface\":\"$IFACE\",\"pubip\":\"$PUBIP\",\"junk\":\"$JUNK\",\"threads\":$threads,\"ram_gib\":$ram_gib,\"accounts_free_gb\":$ACC_FREE,\"ledger_free_gb\":$LED_FREE,\"cpu\":\"$cpu\"}"
+exit 0
+fi
 
 # ------------------------------------------------------------------ 7. binary + config + identity
 REL=/opt/firedancer/releases/$(cat bin/release)
@@ -198,6 +303,7 @@ install -m 755 $FD_BIN_SRC "$REL/firedancer"; ln -sfn "$REL/firedancer" /opt/fir
 ver=$(/opt/firedancer/bin/firedancer --version 2>&1 || true)
 case "$ver" in *"$(cut -d- -f2 bin/release | tr -d v)"*) ;; *) fail "binary version mismatch ($ver vs $(cat bin/release))";; esac
 sed -e "s#@IFACE@#$IFACE#" config/standby.toml.in > /etc/firedancer/standby.toml
+localize toml /etc/firedancer/standby.toml || fail "cannot localize the regional endpoints"
 printf "FD_CONFIG=/etc/firedancer/standby.toml\nFD_CONFIGURE_STAGES=%s\n" "$CONFIGURE_STAGES" > /etc/default/firedancer
 install -m 644 60-fd-tcp-rmem.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-fd-tcp-rmem.conf
 J=/home/$FD_USER/standby-identity.json
@@ -215,7 +321,7 @@ systemctl daemon-reload
 systemctl enable -q --now fd-cpu-governor.service
 systemctl enable -q firedancer-configure.service firedancer.service
 systemctl restart firedancer-configure.service || { journalctl -u firedancer-configure -n 20 --no-pager; fail "configure failed"; }
-systemctl restart firedancer.service
+systemctl reset-failed firedancer.service 2>/dev/null; systemctl restart firedancer.service
 sleep 15; systemctl is-active --quiet firedancer || fail "firedancer did not start"
 log "firedancer started"
 echo "RESULT {\"ok\":true,\"layout\":\"$LAYOUT\",\"iface\":\"$IFACE\",\"pubip\":\"$PUBIP\",\"junk\":\"$JUNK\",\"threads\":$threads,\"ram_gib\":$ram_gib,\"accounts_free_gb\":$ACC_FREE,\"ledger_free_gb\":$LED_FREE,\"cpu\":\"$cpu\"}"

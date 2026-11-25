@@ -22,7 +22,12 @@ pub=sys.argv[1]
 for k in json.load(sys.stdin):
     if " ".join(k.get("key","").split()[:2])==pub: print(k["id"]); break' "$pub")
   if [ -z "$id" ]; then
-    id=$(ch -X POST "$CH_API/ssh-keys" -d "{\"label\":\"fd-standby\",\"key\":\"$(cat "$SSH_KEY.pub")\"}" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("id",""))')
+    # labels must be unique per account: one per key (fingerprint), never reuse another key's label
+    local label; label="fd-standby-$(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}' | sed 's/^SHA256://' | tr -dc 'A-Za-z0-9' | cut -c1-12)"
+    id=$(ch -X POST "$CH_API/ssh-keys" -d "{\"label\":\"$label\",\"key\":\"$(cat "$SSH_KEY.pub")\"}" | python3 -I -c 'import json,sys
+d=json.load(sys.stdin); i=d.get("id") if isinstance(d,dict) else None
+if isinstance(i,int) and i>0 and not d.get("code"): print(i)
+else: print("cherry: SSH key registration failed: %s" % (d.get("message") if isinstance(d,dict) else d), file=sys.stderr)')
   fi
   echo "$id"
 }
@@ -55,7 +60,10 @@ for p in json.load(sys.stdin):
 sys.exit(1)' "$plan"; then part=",\"os_partition_size\":${CHERRY_OS_PARTITION_GB:-50}"; say "cherry: 2-disk plan -> OS partition ${CHERRY_OS_PARTITION_GB:-50} GB"; fi
   for img in $CHERRY_IMAGES; do
     r=$(ch -X POST "$CH_API/projects/$CHERRY_PROJECT_ID/servers" -d "{\"plan\":\"$plan\",\"region\":\"$region\",\"image\":\"$img\",\"hostname\":\"$host\",\"ssh_keys\":[\"$kid\"],\"spot_market\":false,\"cycle\":\"hourly\"$part,\"tags\":{\"role\":\"fd-standby\",\"owner\":\"$FDS_OWNER_TAG\"}}")
-    id=$(echo "$r" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+    # error answers carry "id": 0 too ({"id":0,"code":400,"message":...}): only a positive id is a server
+    id=$(echo "$r" | python3 -I -c 'import json,sys
+d=json.load(sys.stdin); i=d.get("id") if isinstance(d,dict) else None
+if isinstance(i,int) and i>0 and not d.get("code"): print(i)' 2>/dev/null)
     [ -n "$id" ] && { echo "$id"; return; }
     say "cherry create ($img) failed: $(echo "$r" | head -c 300)"
   done

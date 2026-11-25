@@ -1,0 +1,21 @@
+[Unit]
+# A program the primary runs next to its validator against the same ledger (e.g. Harmonic's
+# harmonic-scheduler): same binary, same arguments (see `fd-standby bundle`). Started and stopped
+# with the validator.
+Description=Agave companion %i (fd-standby)
+After=agave-validator.service
+BindsTo=agave-validator.service
+RequiresMountsFor=@LED_MNT@
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=/opt/agave/companion.sh %i
+Restart=always
+RestartSec=5
+LimitNOFILE=1000000
+LimitMEMLOCK=infinity
+LimitCORE=0
+
+[Install]
+WantedBy=agave-validator.service

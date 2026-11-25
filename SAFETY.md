@@ -52,6 +52,45 @@ how the tooling prevents that, what it was tested against, and where the remaini
 12. **Both nodes staked is detected and alerted** by `status`, `failback` and the watchdog (e.g. the
     primary was restarted with the staked key in its config during maintenance).
 
+## Agave nodes (`PRIMARY_CLIENT=agave`, `STANDBY_CLIENT=agave`): how the invariants hold
+
+Checked against Jito-Agave v4.4.0 (`--help` and source, `validator/src/admin_rpc_service.rs`,
+`votor/src/event_handler.rs`, `votor/src/voting_utils.rs`). The rows apply to an Agave primary and
+to an Agave standby alike: on the standby the same code runs through `fds-node`
+(`lib/primary-agave.sh`), driven over SSH. The standby's start command is the primary's with a
+junk `--identity` (generated on the standby) and `--vote-account <pubkey>`.
+
+| Invariant | Firedancer primary | Agave primary |
+|---|---|---|
+| 1 start unstaked | `[paths] identity_key` = junk | `--identity <junk>` in the start command. The staked key is added at runtime only (`authorized-voter add`, then `set-identity`, both from stdin). A junk identity never votes: votor returns "HotSpare" when the identity is not the vote account's node. Runtime authorized voters are lost on restart. `to-standby` and `failover` **refuse** unless the running process was started with the junk `--identity` (pubkey compared), so a restart during maintenance cannot vote. After a hand-back (or a refusal) the standby drops the staked key from its authorized voters (`authorized-voter remove-all`, only while it positively runs junk); its units set `LimitCORE=0` |
+| 2 positive identity | `firedancer get-identity` | `agave-validator contact-info --output json` over the admin socket (no RPC); exit ≠ 0, bad JSON or no valid `id` = unknown |
+| 5 fresh vote history | `.bak` mtime ≥ switch start | Agave writes `vote_history-<pk>.bin` **in place**, and votor applies `set-identity` **asynchronously** (the admin call returns before votor stops voting as the old key). Fresh = written ≤ `AGAVE_VH_SLACK_S` (30 s) before the switch start **and** votor has **logged** that it left the staked identity at/after the switch start (`set-identity: from <STAKED> to …`, written by `handle_set_identity` after it swapped its signing key: positive proof that no vote of the staked key follows, so the validator needs a readable `--log` file) (votor stores the history only on that same event-loop thread, atomically via `.bin.new` + rename, so after the line no write to the staked file can follow: `voting_utils.rs` `insert_vote_and_create_bls_message`, `event_handler.rs` `handle_set_identity`, Jito-Agave 4.4.0). An extra "unchanged for N s" wait is optional (`AGAVE_VH_QUIET_S`, default 0). The file is copied privately and must be unchanged (inode, size, mtime) across that copy, else the swap stops without a restore |
+| 5 hand-back | `--vote-history-file` | no such flag: the file is installed atomically as `<ledger>/vote_history-<pk>.bin` (old one kept as `.fds-replaced`) before `set-identity`. We never pass `--do-not-require-vote-history`, so Agave refuses the switch before changing anything if the file is missing or does not parse |
+| 10 no late switch | `timeout -s KILL`, `pgrep` in-flight, PID unchanged | the same: client under `timeout -s KILL`; in-flight = `--ledger L set-identity\|authorized-voter` processes; PID = the process listening on `L/admin.rpc` (standby: the unit's MainPID). A killed/timed-out client may still have delivered the request → no automatic restore. **Exceptions** (nothing was changed, so the previous voter is restored automatically, both directions): Agave answers "Unable to load vote history file" (that check runs before the switch), or the switch failed before `set-identity` was called (pubkey unreadable, history file could not be installed) |
+| safe window | `firedancer wait` | `wait-for-restart-window --min-idle-time N --skip-new-snapshot-check` (minutes; also delinquent stake ≤ 5 %, health) |
+| caught up | `replay_reset_slot` (finalized) | local RPC `getSlot` commitment finalized |
+| 11 votes on chain | vote account `lastVote` advances | unchanged. Before every swap the vote account (`VOTE_PUBKEY`) must list `STAKED_PUBKEY` as its node: with a wrong one Agave would accept the staked identity without the vote-history check and never vote |
+
+Agave's CLI cannot use the admin socket as root (it fails with EACCES), so fd-standby runs it as the
+socket's owner (`setpriv`). The keypair is still opened by root and passed on stdin.
+
+**Tested so far:** the read-only functions against a live Jito-Agave v4.4.0 mainnet node; the
+complete swap logic (`to-standby`, `to-primary`, `rehearse`, refusal on either side, a hung
+`set-identity`) against two simulated Agave nodes whose voter, like votor, applies `set-identity`
+1 s late (and 8 s late: the swap waits for votor's log line, gap ~13 s): no double votes, every new
+voter continued from the old voter's last vote, gaps 4.3–6 s.
+**Real staked swaps (2026-11-25, Jito-Agave 4.4.0, primary and standby ~190 ms apart):**
+failover/failback with the staked key, plus a primary restart (config change) while the standby
+voted: votor gaps 0.64 s (failover) and 1.09 s (failback), taken from both validators' votor log
+lines, after the timing work (one multiplexed SSH connection, the remote steps merged into one call
+each way, the log path resolved before the switch, no fixed quiet wait). Before it: ~13.6 s / ~24 s.
+**Earlier note (kept for history):** the standby setup on a rented server and a real staked swap
+had not been run when this section was first written. Qualify a server
+type (`fd-standby qualify`, throwaway keys) and do one failover/failback while watching.
+
+With an Agave primary and a *Firedancer* standby, the vote history crosses clients: Agave →
+Firedancer has been used on mainnet, Firedancer → Agave has not. Prove it on testnet first.
+
 ## Lessons that are built in (each one was a real failure)
 
 - **Firedancer renames the vote-history file when switching away from an identity.** After
@@ -118,6 +157,18 @@ firedancer set-identity --config <your.toml> --vote-history-file /tmp/vh.bin <st
 fd-standby down                               # now allowed: this primary is staked
 ```
 
+Agave primary (no `--vote-history-file`; the file is loaded from the ledger directory):
+
+```bash
+fd-standby-swap status <standby-ip>          # both must report junk
+scp root@<standby-ip>:/mnt/fd-ledger/agave/vote_history-<STAKED>.bin /tmp/vh.bin
+L=<your --ledger>; cp $L/vote_history-<STAKED>.bin $L/vote_history-<STAKED>.bin.old 2>/dev/null
+install -o <ledger owner> -m 644 /tmp/vh.bin $L/vote_history-<STAKED>.bin
+agave-validator --ledger $L authorized-voter add < <staked keypair>   # as the ledger owner
+agave-validator --ledger $L set-identity < <staked keypair>
+fd-standby down
+```
+
 If the standby is unreachable, its vote history is lost: wait until the slots it may have voted on
 are finalized (a few minutes) before switching the primary to the staked key with its own history.
 
@@ -130,7 +181,16 @@ are finalized (a few minutes) before switching the primary to the staked key wit
 - The safety checks use SSH and `get-identity`. If the network between primary and standby fails
   in the middle of a swap, the script stops; it never guesses. Check both nodes manually
   (`fd-standby-swap status HOST`) before doing anything else.
-- Tested against FireBAM v26.10.8 (Alpenglow). Firedancer's `set-identity` / vote-history
+- Tested against FireBAM v26.10.8 (Alpenglow); the Agave adapters against Jito-Agave v4.4.0
+  (read-only functions on a live mainnet node, switch logic in a two-node simulation only).
+- An Agave standby inherits your start command. Settings that only make sense on your primary's
+  hardware (e.g. `--experimental-poh-pinned-cpu-core`) carry over unless you drop/replace them
+  (`STANDBY_AGAVE_DROP_ARGS` / `STANDBY_AGAVE_EXTRA_ARGS`). Regional endpoints (Jito, BAM,
+  Harmonic, shred relays) are re-pointed to the standby's closest region only when they are in
+  `config/regional-endpoints.conf`; any other host is kept as on the primary (with a warning).
+  Re-pointing never changes WHICH services the standby uses, and none of them takes part in the
+  vote/identity safety (the standby's junk identity is not whitelisted at Jito BAM / Harmonic;
+  that is expected until the staked key is switched in). Firedancer's `set-identity` / vote-history
   behaviour may change between versions — run `fd-standby-swap rehearse` and a dry run
   (`--dry-run`) after every Firedancer upgrade.
 - SSH host keys are trusted on first use per rented server (`StrictHostKeyChecking=accept-new`, a

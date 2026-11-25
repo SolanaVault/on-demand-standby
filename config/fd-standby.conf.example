@@ -6,15 +6,78 @@
 STAKED_PUBKEY=
 # Vote account public key (used only for status/verification via public RPC).
 VOTE_PUBKEY=
-# Firedancer config of the PRIMARY (this machine). Its [paths] identity_key must be a
-# JUNK (unstaked) key: the primary always starts unstaked and only becomes staked via
-# `fd-standby-swap` or by an explicit `firedancer set-identity`.
-PRIMARY_FD_CONFIG=/etc/firedancer/mainnet.toml
+# Validator client of the PRIMARY (this machine): firedancer (default) or agave (incl. Jito-Agave).
+PRIMARY_CLIENT=firedancer
+# Client of the rented STANDBY: default = same as the primary. agave needs PRIMARY_CLIENT=agave
+# (it runs the primary's own agave build and command line); an Agave primary may also use a
+# Firedancer standby (STANDBY_CLIENT=firedancer + STANDBY_FD_BIN / STANDBY_FD_TEMPLATE below).
+#STANDBY_CLIENT=agave
 # The staked identity keypair on the PRIMARY (root 0600). Copied to the standby only
-# during a swap and shredded there afterwards.
+# during a swap and shredded there afterwards. Never the key the primary is started with.
 PRIMARY_STAKED_KEY=/etc/firedancer/keys/staked-identity.json
+
+# --- PRIMARY_CLIENT=firedancer
+# Firedancer config of the PRIMARY. Its [paths] identity_key must be a JUNK (unstaked) key: the
+# primary always starts unstaked and only becomes staked via `fd-standby-swap` or by an explicit
+# `firedancer set-identity`.
+PRIMARY_FD_CONFIG=/etc/firedancer/mainnet.toml
 # Firedancer binary on the primary (its exact build is shipped to the standby).
 FD_BIN=/opt/firedancer/bin/firedancer
+
+# --- PRIMARY_CLIENT=agave
+# agave-validator binary (the one that runs; its solana-keygen is used for pubkeys).
+#AGAVE_BIN=/home/sol/.local/share/solana/install/active_release/bin/agave-validator
+# --ledger of the running validator (admin socket, vote history vote_history-<pubkey>.bin).
+#AGAVE_LEDGER=/mnt/ledger
+# JUNK (unstaked) identity keypair the validator is STARTED with (--identity). The staked key is
+# never in the start command: fd-standby adds it as authorized voter and switches to it at runtime.
+#AGAVE_JUNK_KEY=/home/sol/junk-identity.json
+# Local JSON-RPC of the validator (caught-up check, commitment finalized).
+#AGAVE_RPC_URL=http://127.0.0.1:8899
+# wait-for-restart-window --min-idle-time (MINUTES without an own leader slot) before switching away.
+#AGAVE_MIN_IDLE_MIN=2
+# The staked vote history counts as final once votor LOGGED the switch away from the staked key
+# (positive proof, see SAFETY.md). Optional extra wait: unchanged for this many seconds (0 = none).
+# It must also have been written <= SLACK s before the switch.
+#AGAVE_VH_QUIET_S=0
+#AGAVE_VH_SLACK_S=30
+
+# --- STANDBY_CLIENT=agave (default for an Agave primary)
+# The standby MIRRORS the primary: this primary's agave-validator + solana-keygen with this primary's
+# RUNNING command line (Jito, BAM, Harmonic, shred relays: exactly what you run, nothing added), minus
+# identity/vote-account keypairs, paths, public addresses and ports (`fd-standby doctor` prints the
+# result). Flags it cannot place (a path or this host's IP) stop the bundle: drop them here; EXTRA
+# args are appended for flags the standby needs and the primary does not have.
+#STANDBY_AGAVE_DROP_ARGS="--some-flag"
+#STANDBY_AGAVE_EXTRA_ARGS="--some-flag value"
+# Programs that run next to the validator against its ledger (e.g. Harmonic's harmonic-scheduler)
+# run on the standby too, same binary and arguments: auto (found by --ledger) | none | names.
+#STANDBY_AGAVE_COMPANIONS=auto
+# VOTE_PUBKEY (above) is required: the standby starts with --vote-account <pubkey>.
+# Snapshot sources: gossip identities of snapshot servers. Their current RPC address is looked up
+# at bundle time and the standby downloads from there before it starts; they are also added as
+# --known-validator when your command line uses --known-validator. Default: snappie.sh.
+# Empty ("") = none: the standby fetches its own via gossip (your --known-validator rules).
+#STANDBY_SNAPSHOT_SOURCES="snappieAMus13pmFwd8aDPKDHTTVYWo6y41zSpasU8L"
+# Fixed snapshot URLs, tried first (RPC-style /snapshot.tar.bz2 + /incremental-snapshot.tar.bz2).
+#STANDBY_SNAPSHOT_URLS="http://snapshot-host-1:8899"
+# Unix user on the standby, its UDP/TCP port range (firewall + --dynamic-port-range, >= 26 ports),
+# and the RAM a box needs (Agave mainnet: like your primary).
+#STANDBY_AGAVE_USER=sol
+#STANDBY_AGAVE_PORT_RANGE=8000-8100
+#STANDBY_MIN_RAM_GIB=360
+
+# --- Regional endpoints (both clients). The primary's Jito / BAM / Harmonic / shred-relay endpoints
+# are re-pointed on the standby to the region closest to the STANDBY (ping, per provider; table:
+# config/regional-endpoints.conf, or your own copy in REGIONAL_ENDPOINTS). Only endpoints the
+# primary uses; a provider the primary does not use is never added. To pin a region instead:
+#STANDBY_REGIONS="jito=frankfurt bam=fra harmonic=fra"
+#REGIONAL_ENDPOINTS=/etc/fd-standby/regional-endpoints.conf
+
+# --- STANDBY_CLIENT=firedancer for an Agave primary: Firedancer build and config template
+# (see config/standby-firedancer.toml.example).
+#STANDBY_FD_BIN=/opt/firedancer/bin/firedancer
+#STANDBY_FD_TEMPLATE=/etc/fd-standby/standby-firedancer.toml
 
 # ---------------------------------------------------------------- providers
 # Cherry Servers (https://api.cherryservers.com): API token file and project id.
@@ -28,8 +91,9 @@ CHERRY_OS_PARTITION_GB=50
 VULTR_KEY_FILE=/etc/fd-standby/vultr-api-key
 VULTR_OS_IDS="2760 2284"
 
-# Candidate server types (provider plan region qualified). Shipped list: config/candidates.conf
-CANDIDATES_FILE=/etc/fd-standby/candidates.conf
+# Candidate server types (provider plan region qualified). Qualification is per standby client:
+# default /etc/fd-standby/candidates.conf (Firedancer) or candidates-agave.conf (Agave).
+#CANDIDATES_FILE=/etc/fd-standby/candidates.conf
 # Never rent anything more expensive than this per hour (provider currency, EUR on Cherry).
 MAX_PRICE_PER_HOUR=3.0
 # Vultr bills in USD; converted with this factor for the price cap.
@@ -52,7 +116,7 @@ DELIVERY_MAX_S=2700
 # Max time for a standby / the primary to catch up after start.
 CATCHUP_MAX_S=3600
 # Lag threshold (slots) vs public RPC for "caught up" before a swap. Firedancer's
-# replay_reset_slot tracks the finalized slot, normally 5-20 behind the RPC tip.
+# replay_reset_slot and Agave's finalized slot are normally 0-20 behind the RPC tip.
 SWAP_MAX_LAG=30
 # Watchdog: alert on standbys older than ALERT_AFTER_H, delete unstaked ones older than DELETE_AFTER_H.
 WATCHDOG_ALERT_AFTER_H=3

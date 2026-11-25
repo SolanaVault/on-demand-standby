@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# fds-node: node operations on an AGAVE standby, called by the primary over SSH.
+# Installed by standby-init.sh as /usr/local/sbin/fds-node, next to primary-agave.sh (the same
+# adapter the primary uses for itself) and node.env (written by `fd-standby bundle`).
+#
+#   fds-node id | pubkey FILE | prepare | unprepare | setid [--vote-history-file F] KEY | no-setid | pid | slot
+#            vh-file | vh-fresh EPOCH | vh-fp | wait | votor-ts FROM [TO]
+set -uo pipefail
+D=$(dirname "$(readlink -f "$0")")
+# shellcheck disable=SC2034  # used by primary-agave.sh
+FDS_CONF=$D/node.env
+# shellcheck disable=SC2034
+B58='[1-9A-HJ-NP-Za-km-z]{32,44}'
+# shellcheck disable=SC1091
+. "$D/node.env"
+SETID_TIMEOUT=${SETID_TIMEOUT:-60}
+# shellcheck source=../lib/primary-agave.sh
+. "$D/primary-agave.sh"
+p_load_config
+cmd=${1:-}; shift || true
+case "$cmd" in
+  id) p_id ;;
+  pubkey) keypub_local "${1:?file}" ;;
+  prepare) p_prepare_staked ;;
+  unprepare) p_unprepare_staked ;;
+  setid) p_setid "$@" ;;
+  no-setid) p_no_setid ;;
+  pid) p_pid ;;
+  slot) p_slot ;;
+  vh-file) p_vh_file ;;
+  vh-fresh) [[ "${1:-}" =~ ^[0-9]+$ ]] || exit 2; p_vh_fresh "$1" ;;
+  vh-fp) p_vh_fp ;;
+  wait) p_wait ;;
+  votor-ts) p_votor_ts "${1-}" "${2-}" ;;
+  *) sed -n 2,7p "$0"; exit 2 ;;
+esac
