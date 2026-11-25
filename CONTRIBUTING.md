@@ -9,13 +9,13 @@ used when one is out of stock.
    standard, immediately deployable plan with ≥48 threads, ≥256 GB RAM and NVMe.
 2. Run, on your primary:
    ```bash
-   fd-standby qualify PROVIDER PLAN REGION
+   ods qualify PROVIDER PLAN REGION
    ```
    This rents one server for about 30 minutes (one billed hour), sets it up, catches up, rehearses
    a swap **with throwaway keys only**, times a cold restart, and deletes the server. Your staked
    identity is never moved.
 3. Open a pull request that changes the row to `yes` and includes the line appended to
-   `/var/lib/fd-standby/qualifications.log`, for example:
+   `/var/lib/ods/qualifications.log`, for example:
    ```
    2026-11-24 cherry amd-epyc-9275f LT-Siauliai cold_restart_s=157 hw=48|377|1.7T ...
    ```
@@ -27,8 +27,8 @@ rehearsal), a PR that records the failure (as a comment on the row) is just as w
 ## Add a provider
 
 Create `lib/provider-NAME.sh` implementing the six functions documented at the top of
-`lib/provider-cherry.sh`, add NAME to `PROVIDERS` in `bin/fd-standby`, add config keys to
-`config/fd-standby.conf.example`, and qualify at least one plan with it. Requirements:
+`lib/provider-cherry.sh`, add NAME to `PROVIDERS` in `bin/ods`, add config keys to
+`config/ods.conf.example`, and qualify at least one plan with it. Requirements:
 hourly billing, an API for create / status / delete, per-region stock visible before ordering,
 and deletion that stops billing.
 

@@ -1,0 +1,6 @@
+[Unit]
+Description=ods: qualify at most one new in-stock server type (throwaway keys only, costs ~1 hour of that server)
+[Service]
+SuccessExitStatus=75
+Type=oneshot
+ExecStart=/opt/ods/bin/ods qualify-queue --max 1

@@ -1,4 +1,4 @@
-# fd-standby configuration. Copy to /etc/fd-standby/fd-standby.conf (root:root 0600) and edit.
+# ods configuration. Copy to /etc/ods/ods.conf (root:root 0600) and edit.
 # This file is sourced by bash: KEY=value, no spaces around '='.
 
 # ---------------------------------------------------------------- your validator
@@ -18,7 +18,7 @@ PRIMARY_STAKED_KEY=/etc/firedancer/keys/staked-identity.json
 
 # --- PRIMARY_CLIENT=firedancer
 # Firedancer config of the PRIMARY. Its [paths] identity_key must be a JUNK (unstaked) key: the
-# primary always starts unstaked and only becomes staked via `fd-standby-swap` or by an explicit
+# primary always starts unstaked and only becomes staked via `ods-swap` or by an explicit
 # `firedancer set-identity`.
 PRIMARY_FD_CONFIG=/etc/firedancer/mainnet.toml
 # Firedancer binary on the primary (its exact build is shipped to the standby).
@@ -30,7 +30,7 @@ FD_BIN=/opt/firedancer/bin/firedancer
 # --ledger of the running validator (admin socket, vote history vote_history-<pubkey>.bin).
 #AGAVE_LEDGER=/mnt/ledger
 # JUNK (unstaked) identity keypair the validator is STARTED with (--identity). The staked key is
-# never in the start command: fd-standby adds it as authorized voter and switches to it at runtime.
+# never in the start command: ods adds it as authorized voter and switches to it at runtime.
 #AGAVE_JUNK_KEY=/home/sol/junk-identity.json
 # Local JSON-RPC of the validator (caught-up check, commitment finalized).
 #AGAVE_RPC_URL=http://127.0.0.1:8899
@@ -45,7 +45,7 @@ FD_BIN=/opt/firedancer/bin/firedancer
 # --- STANDBY_CLIENT=agave (default for an Agave primary)
 # The standby MIRRORS the primary: this primary's agave-validator + solana-keygen with this primary's
 # RUNNING command line (Jito, BAM, Harmonic, shred relays: exactly what you run, nothing added), minus
-# identity/vote-account keypairs, paths, public addresses and ports (`fd-standby doctor` prints the
+# identity/vote-account keypairs, paths, public addresses and ports (`ods doctor` prints the
 # result). Flags it cannot place (a path or this host's IP) stop the bundle: drop them here; EXTRA
 # args are appended for flags the standby needs and the primary does not have.
 #STANDBY_AGAVE_DROP_ARGS="--some-flag"
@@ -72,28 +72,28 @@ FD_BIN=/opt/firedancer/bin/firedancer
 # config/regional-endpoints.conf, or your own copy in REGIONAL_ENDPOINTS). Only endpoints the
 # primary uses; a provider the primary does not use is never added. To pin a region instead:
 #STANDBY_REGIONS="jito=frankfurt bam=fra harmonic=fra"
-#REGIONAL_ENDPOINTS=/etc/fd-standby/regional-endpoints.conf
+#REGIONAL_ENDPOINTS=/etc/ods/regional-endpoints.conf
 
 # --- STANDBY_CLIENT=firedancer for an Agave primary: Firedancer build and config template
 # (see config/standby-firedancer.toml.example).
 #STANDBY_FD_BIN=/opt/firedancer/bin/firedancer
-#STANDBY_FD_TEMPLATE=/etc/fd-standby/standby-firedancer.toml
+#STANDBY_FD_TEMPLATE=/etc/ods/standby-firedancer.toml
 
 # ---------------------------------------------------------------- providers
 # Cherry Servers (https://api.cherryservers.com): API token file and project id.
-CHERRY_TOKEN_FILE=/etc/fd-standby/cherry-api-token
+CHERRY_TOKEN_FILE=/etc/ods/cherry-api-token
 CHERRY_PROJECT_ID=
 # OS image slugs to try, in order (binary needs glibc >= the primary's build requirement).
 CHERRY_IMAGES="ubuntu_26_04_64bit ubuntu_24_04_64bit"
 # 2-disk plans (< 2 TB per disk) are ordered with this OS partition size so the rest can hold data.
 CHERRY_OS_PARTITION_GB=50
 # Vultr (experimental, see README): API key file. Leave the file absent to disable.
-VULTR_KEY_FILE=/etc/fd-standby/vultr-api-key
+VULTR_KEY_FILE=/etc/ods/vultr-api-key
 VULTR_OS_IDS="2760 2284"
 
 # Candidate server types (provider plan region qualified). Qualification is per standby client:
-# default /etc/fd-standby/candidates.conf (Firedancer) or candidates-agave.conf (Agave).
-#CANDIDATES_FILE=/etc/fd-standby/candidates.conf
+# default /etc/ods/candidates.conf (Firedancer) or candidates-agave.conf (Agave).
+#CANDIDATES_FILE=/etc/ods/candidates.conf
 # Never rent anything more expensive than this per hour (provider currency, EUR on Cherry).
 MAX_PRICE_PER_HOUR=3.0
 # Vultr bills in USD; converted with this factor for the price cap.
@@ -101,7 +101,7 @@ USD_TO_EUR=0.92
 
 # ---------------------------------------------------------------- standby
 # SSH key used to reach standbys (created by install.sh if missing).
-SSH_KEY=/root/.ssh/id_ed25519_fd_standby
+SSH_KEY=/root/.ssh/id_ed25519_ods
 # Firedancer `configure` stages on the standby (must exist in your Firedancer version;
 # network stages are not needed because the standby uses the socket provider).
 STANDBY_CONFIGURE_STAGES="hugetlbfs sysctl irq-affinity irq-balance kworkers cpuset console snapshots"
@@ -126,6 +126,6 @@ PUBLIC_RPCS="https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.c
 
 # ---------------------------------------------------------------- alerting
 # Command run with the alert text as its only argument. Examples:
-#   ALERT_CMD="logger -t fd-standby"
+#   ALERT_CMD="logger -t ods"
 #   ALERT_CMD="/usr/local/bin/my-telegram-alert"
-ALERT_CMD="logger -t fd-standby"
+ALERT_CMD="logger -t ods"

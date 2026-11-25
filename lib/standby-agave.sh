@@ -5,16 +5,16 @@
 #
 # The standby runs the primary's OWN agave-validator build with the primary's OWN command line,
 # minus everything host-specific (identity, vote account keypair, paths, public addresses, ports),
-# plus the standby layout. Every node operation on the standby goes through `fds-node`
-# (standby/fds-node), which runs the SAME functions as the primary adapter (lib/primary-agave.sh):
+# plus the standby layout. Every node operation on the standby goes through `ods-node`
+# (standby/ods-node), which runs the SAME functions as the primary adapter (lib/primary-agave.sh):
 # one implementation of set-identity / vote-history / freshness for both ends.
 
 S_AGAVE_DIR=/opt/agave
-S_NODE=/usr/local/sbin/fds-node
+S_NODE=/usr/local/sbin/ods-node
 
 s_load_config(){
   [ "$PRIMARY_CLIENT" = agave ] || { echo "STANDBY_CLIENT=agave needs PRIMARY_CLIENT=agave (it ships the primary's agave build)" >&2; exit 2; }
-  : "${VOTE_PUBKEY:?set VOTE_PUBKEY in $FDS_CONF (the Agave standby is started with --vote-account <pubkey>)}"
+  : "${VOTE_PUBKEY:?set VOTE_PUBKEY in $ODS_CONF (the Agave standby is started with --vote-account <pubkey>)}"
   [[ "$VOTE_PUBKEY" =~ ^$B58$ ]] || { echo "VOTE_PUBKEY is not a base58 pubkey" >&2; exit 2; }
   S_USER=${STANDBY_AGAVE_USER:-sol}
   S_NAME=agave
@@ -31,7 +31,7 @@ s_load_config(){
   S_JUNK_KEY=/home/$S_USER/standby-identity.json
   S_UNIT=agave-validator
   S_METRICS_PORT=""
-  S_SETID_REFUSED=3      # fds-node setid: the validator refused (vote history unloadable), nothing changed
+  S_SETID_REFUSED=3      # ods-node setid: the validator refused (vote history unloadable), nothing changed
 }
 
 s_id(){ _last_pubkey sshs "$1" "$S_NODE id"; }
@@ -73,7 +73,7 @@ argv = open(f'/proc/{pid}/cmdline', 'rb').read().decode().split('\0')
 if argv and argv[-1] == '': argv.pop()
 args = argv[1:]
 if not name and args[:1] == ['run']: args = args[1:]
-# set by fd-standby (standby layout / junk identity), or meaningless on another host
+# set by ods (standby layout / junk identity), or meaningless on another host
 DROP = {'--identity', '-i', '--vote-account', '--authorized-voter', '--ledger', '-l', '--accounts',
         '--accounts-index-path', '--accounts-hash-cache-path', '--snapshots', '--full-snapshot-archive-path',
         '--incremental-snapshot-archive-path', '--tower', '--log', '-o', '--rpc-bind-address', '--rpc-port',
@@ -213,18 +213,18 @@ print("agave-%s-%s" % (m.group(1) if m else "x", s.group(1) if s else "x"))' "$v
   done < <(s_agave_companions)
   s_snapshot_urls > "$d/config/snapshot-urls"
   mkdir -p "$d/node"
-  install -m 755 "$FDS_ROOT/standby/fds-node" "$d/node/fds-node"
-  install -m 644 "$FDS_ROOT/lib/primary-agave.sh" "$d/node/primary-agave.sh"
+  install -m 755 "$ODS_ROOT/standby/ods-node" "$d/node/ods-node"
+  install -m 644 "$ODS_ROOT/lib/primary-agave.sh" "$d/node/primary-agave.sh"
   { printf 'STAKED_PUBKEY=%q\nPRIMARY_STAKED_KEY=%q\n' "$STAKED_PUBKEY" "$S_STAKED_KEY"
     printf 'AGAVE_BIN=%q\nAGAVE_KEYGEN=%q\n' "$S_AGAVE_DIR/active/agave-validator" "$S_AGAVE_DIR/active/solana-keygen"
     printf 'AGAVE_LEDGER=%q\nAGAVE_JUNK_KEY=%q\nAGAVE_RPC_URL=%q\n' "$S_BASE" "$S_JUNK_KEY" "http://127.0.0.1:$S_RPC_PORT"
     printf 'AGAVE_MIN_IDLE_MIN=%q\nAGAVE_VH_QUIET_S=%q\nAGAVE_VH_SLACK_S=%q\nSETID_TIMEOUT=%q\n' \
       "$AGAVE_MIN_IDLE_MIN" "$AGAVE_VH_QUIET_S" "$AGAVE_VH_SLACK_S" "$SETID_TIMEOUT"
-    # the standby's --log is fixed by the bundle: fds-node need not look it up (~1.6 s per call)
+    # the standby's --log is fixed by the bundle: ods-node need not look it up (~1.6 s per call)
     printf 'AGAVE_LOG_FILE=%q\n' "$S_LOG"; } > "$d/node/node.env"
-  sed "s#@PORT_RANGE@#$S_PORT_RANGE#g" "$FDS_ROOT/standby/standby-agave.nft.in" > "$d/standby.nft.in"
-  cp "$FDS_ROOT/standby/units/agave-validator.service" "$FDS_ROOT/standby/units/agave-companion@.service" "$d/units/"
-  cp "$FDS_ROOT/standby/60-agave.conf" "$d/"
+  sed "s#@PORT_RANGE@#$S_PORT_RANGE#g" "$ODS_ROOT/standby/standby-agave.nft.in" > "$d/standby.nft.in"
+  cp "$ODS_ROOT/standby/units/agave-validator.service" "$ODS_ROOT/standby/units/agave-companion@.service" "$d/units/"
+  cp "$ODS_ROOT/standby/60-agave.conf" "$d/"
   printf 'MIN_RAM_GIB=%q\nREQ_FLAGS=%q\nMIN_GLIBC=%q\nRPC_PORT=%q\n' "$S_MIN_RAM_GIB" "avx avx2 sse4_2 popcnt" "${glibc#GLIBC_}" "$S_RPC_PORT" >> "$d/config/standby.env"
   echo "$rel $(sha256sum "$d/bin/agave-validator" | cut -c1-12)"
 }

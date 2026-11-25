@@ -2,38 +2,39 @@
 
 **Zero-downtime maintenance for a single Firedancer or Agave validator, with a standby you rent by the hour.**
 
-Commands: `fd-standby`, `fd-standby-swap`. A community tool, not affiliated with Jump Crypto, the Firedancer project, Jito or any server provider.
+Commands: `ods` (**o**n-**d**emand **s**tandby) and `ods-swap`; until Nov 2026 they were called
+`fd-standby` / `fd-standby-swap` (see [Upgrading from fd-standby](#upgrading-from-fd-standby)). A community tool, not affiliated with Jump Crypto, the Firedancer project, Jito or any server provider.
 
-You run one Firedancer validator. Before you take it down — an upgrade, a reboot, a disk swap,
-anything — you run **`fd-standby failover`**:
+You run one Firedancer or Agave validator. Before you take it down — an upgrade, a reboot, a disk swap,
+anything — you run **`ods failover`**:
 
 1. it rents a bare-metal server by the hour (only server types that are **in stock right now** and **proven to work**),
-2. sets it up automatically as a Firedancer node with a throwaway identity, using **your exact binary and config**,
+2. sets it up automatically as a node of your client (Firedancer or Agave) with a throwaway identity, using **your exact binary and config**,
 3. waits until it has caught up with the cluster and rehearses an identity switch on it with throwaway keys,
-4. moves your **staked identity** (with its fresh vote history) to it — the voting gap is ~4 s.
+4. moves your **staked identity** (with its fresh vote history) to it — the voting gap is about a second (Agave, measured: 0.6–1.1 s).
 
 Now the standby votes and you do whatever you need on your primary. **What happens in between is
-up to you; fd-standby does not touch your primary.** The only requirement: when you are done, the
-primary's Firedancer is running again on its **junk** identity (which is what a restart does, see
-Requirements) and has caught up. Then **`fd-standby failback`**:
+up to you; ods does not touch your primary.** The only requirement: when you are done, the
+primary's validator is running again on its **junk** identity (which is what a restart does, see
+Requirements) and has caught up. Then **`ods failback`**:
 
 5. checks that the primary is ready (or waits for it with `--wait`),
-6. moves the staked identity back (~4 s), shreds the key copy on the standby and verifies that,
+6. moves the staked identity back (about a second), shreds the key copy on the standby and verifies that,
 7. deletes the rented server and verifies it is gone.
 
 A typical maintenance window costs **one to two euros** (one hour of a server).
 No second validator machine is needed for planned maintenance.
 
 ```
-$ fd-standby failover --yes
+$ ods failover --yes
 [10:14:12] creating cherry amd-threadripper-pro-7965wx in LT-Siauliai (~1.676/h)
 [10:24:..] delivered in 10 min; firewall, disks, Firedancer set up; caught up
 [10:27:51] standby: switch to STAKED with the primary's vote history     voting gap ~4.1 s
-[10:28:..] FAILED OVER: standby votes. Do your work on this primary now ... then run: fd-standby failback
+[10:28:..] FAILED OVER: standby votes. Do your work on this primary now ... then run: ods failback
 
 $ systemctl restart firedancer        # <- your maintenance: upgrade, reboot, whatever
 
-$ fd-standby failback --wait
+$ ods failback --wait
 [10:41:19] primary ready
 [10:41:50] primary: switch to STAKED                                      voting gap ~4.5 s
 [10:42:28] standby key shredded (verified)
@@ -50,7 +51,7 @@ $ fd-standby failback --wait
 | Longer work | anything | the watchdog alerts after 3 h but never deletes a standby that votes |
 
 Failback always returns to the machine `failover` was run on. Moving to a *new* primary server is not
-automated yet (set up the new box, then `fd-standby-swap` from it — open an issue if you need this).
+automated yet (set up the new box, then `ods-swap` from it — open an issue if you need this).
 
 > **Status: early but real.** Developed and run against mainnet with FireBAM (Jito's Firedancer fork)
 > v26.10.8 under Alpenglow, on one validator so far. **Agave primaries are new and not yet proven
@@ -59,7 +60,7 @@ automated yet (set up the new box, then `fd-standby-swap` from it — open an is
 
 ## Qualified servers
 
-Only these types are used by default. Each one was **actually tested** with `fd-standby qualify`
+Only these types are used by default. Each one was **actually tested** with `ods qualify`
 (or a full real maintenance run): delivered, set up automatically, caught up, swap rehearsal with
 throwaway keys, timed cold restart, deleted. Same plan = same hardware, so a plan proven in one
 region is allowed in every region where the provider offers it.
@@ -79,7 +80,7 @@ region is allowed in every region where the provider offers it.
 
 More types are listed as `no` in [config/candidates.conf](config/candidates.conf): eligible on
 paper, not yet tested. **The community is very welcome to add qualified types** — run
-`fd-standby qualify`, and open a pull request with the evidence line (see
+`ods qualify`, and open a pull request with the evidence line (see
 [CONTRIBUTING.md](CONTRIBUTING.md)). The more types are qualified, the more likely one is in stock
 when you need it.
 
@@ -98,7 +99,7 @@ Adding a provider = one file `lib/provider-NAME.sh` implementing six functions
 
 **Primary (your validator):** Firedancer (below) or Agave (see [Agave primary](#agave-primary)).
 - Firedancer (full Firedancer, not Frankendancer). Tested with FireBAM v26.10.8 on Ubuntu 26.04.
-  fd-standby does not care how you run it (systemd, script, ...); it talks to it with
+  ods does not care how you run it (systemd, script, ...); it talks to it with
   `firedancer get-identity / set-identity / wait` using your config file. Let your service manager
   restart Firedancer on failure: after a restart it must come back by itself for `failback`.
 - Your Firedancer config's `[paths] identity_key` points to a **junk (unstaked) key**. The staked
@@ -121,7 +122,7 @@ the validator must be *started* with a junk `--identity` (the staked key is swit
 runtime), and it must write a readable `--log` file: a swap confirms in it that votor really
 stopped voting as the old identity before the vote history is copied.
 
-Set `PRIMARY_CLIENT=agave` and the `AGAVE_*` settings in `fd-standby.conf`. By default the standby
+Set `PRIMARY_CLIENT=agave` and the `AGAVE_*` settings in `ods.conf`. By default the standby
 runs **Agave too** (`STANDBY_CLIENT=agave`): your own `agave-validator` build and your own running
 command line, so the vote history never changes client. Developed against Jito-Agave v4.4.0 under
 Alpenglow; every subcommand and flag used was checked against that binary's `--help` and source.
@@ -131,16 +132,16 @@ Alpenglow; every subcommand and flag used was checked against that binary's `--h
   separate root-only file (`PRIMARY_STAKED_KEY`) and is given to the validator at runtime over
   the admin socket, on stdin (`authorized-voter add`, then `set-identity`). Agave does not vote on a
   junk identity (votor "hot spare"), so any restart comes back unstaked. Consequence: after a
-  restart *outside* fd-standby you switch to the staked key yourself. `fd-standby doctor` checks
+  restart *outside* ods you switch to the staked key yourself. `ods doctor` checks
   what the running process's `--identity` path points to now.
-- **Admin socket**: fd-standby runs as root but calls `agave-validator --ledger <AGAVE_LEDGER> ...`
+- **Admin socket**: ods runs as root but calls `agave-validator --ledger <AGAVE_LEDGER> ...`
   as the owner of `<ledger>/admin.rpc` (the agave CLI cannot use the socket as root).
 - **Local RPC** (`AGAVE_RPC_URL`, default `http://127.0.0.1:8899`): caught-up check (finalized slot).
 - **Safe window**: `wait-for-restart-window --min-idle-time AGAVE_MIN_IDLE_MIN` (minutes; it also
   requires delinquent stake ≤ 5 % and a healthy node).
 - **Vote history**: Agave reads `<ledger>/vote_history-<pubkey>.bin` (there is no
   `--vote-history-file`). The incoming file is installed there (the previous one is kept as
-  `….bin.fds-replaced`) and `set-identity` is called without `--do-not-require-vote-history`, so
+  `….bin.ods-replaced`) and `set-identity` is called without `--do-not-require-vote-history`, so
   Agave refuses the switch, and changes nothing, if it cannot load it; the swap then restores the
   previous voter automatically.
 
@@ -148,36 +149,55 @@ Alpenglow; every subcommand and flag used was checked against that binary's `--h
 from your install and derives the standby command line from your *running* validator:
 identity/vote-account keypairs, all paths, public addresses, port range, `--no-snapshot-fetch`
 and multicast shred receivers (DoubleZero) are removed, the standby layout, a junk `--identity`
-and `--vote-account <VOTE_PUBKEY>` are added. `fd-standby doctor` prints the result. Anything it
+and `--vote-account <VOTE_PUBKEY>` are added. `ods doctor` prints the result. Anything it
 cannot place (another path flag, this host's IP) stops the bundle: list it in
 `STANDBY_AGAVE_DROP_ARGS`, add replacements with `STANDBY_AGAVE_EXTRA_ARGS`. Programs that run
 next to the validator against its ledger (e.g. Harmonic's `harmonic-scheduler` with Salsa 4.x)
 are found automatically and run on the standby too, same binary and arguments
 (`STANDBY_AGAVE_COMPANIONS`). Snapshots: see "Snapshots". On the standby every node operation runs
-through `fds-node`, which uses the same code (`lib/primary-agave.sh`) as the primary.
+through `ods-node`, which uses the same code (`lib/primary-agave.sh`) as the primary.
 Server types are qualified per client: an Agave standby uses `candidates-agave.conf` (all `no` at
-first, ≥ 360 GiB RAM by default): run `fd-standby qualify` before the first failover.
+first, ≥ 360 GiB RAM by default): run `ods qualify` before the first failover.
 
 A Firedancer standby for an Agave primary also works (`STANDBY_CLIENT=firedancer`,
 `STANDBY_FD_BIN`, `STANDBY_FD_TEMPLATE`, see `config/standby-firedancer.toml.example`; FireBAM
 if you use Jito BAM), but then the vote history crosses clients; Firedancer → Agave is unproven.
 
+## Upgrading from fd-standby
+
+The tool was renamed with no compatibility layer. On a primary that ran `fd-standby`, with **no
+standby rented** (`fd-standby status` says "no standby"; delete any first with `fd-standby down`):
+
+```
+sudo systemctl disable --now fd-standby-watchdog.timer fd-standby-qualify.timer 2>/dev/null
+sudo mv /etc/fd-standby /etc/ods && sudo mv /etc/ods/fd-standby.conf /etc/ods/ods.conf
+sudo mv /var/lib/fd-standby /var/lib/ods && sudo rm -f /var/lib/ods/lock
+sudo mv /root/.ssh/id_ed25519_fd_standby /root/.ssh/id_ed25519_ods
+sudo mv /root/.ssh/id_ed25519_fd_standby.pub /root/.ssh/id_ed25519_ods.pub
+sudo rm -f /usr/local/sbin/fd-standby /usr/local/sbin/fd-standby-swap /etc/systemd/system/fd-standby-*
+# then install as below (install.sh), and fix paths in /etc/ods/ods.conf that still say fd-standby
+```
+
+Servers rented by fd-standby carry the old provider tag and are **not** seen by `ods`: delete them
+before upgrading. Variables `FDS_*` are now `ODS_*`; on standbys everything is under `ods` names
+(`/opt/ods-node`, `/mnt/ods-ledger`, `/mnt/ods-accounts`).
+
 ## Quick start
 
 ```bash
-git clone https://github.com/SolanaVault/on-demand-standby /opt/src/fd-standby && cd /opt/src/fd-standby
-sudo ./install.sh                     # code -> /opt/fd-standby, config skeleton, SSH key, watchdog timer
-sudo $EDITOR /etc/fd-standby/fd-standby.conf
-echo '<cherry api token>' | sudo tee /etc/fd-standby/cherry-api-token >/dev/null; sudo chmod 600 /etc/fd-standby/cherry-api-token
-sudo fd-standby doctor                # checks everything, changes nothing, spends nothing
-sudo fd-standby stock                 # qualified types in stock right now, cheapest first
-sudo fd-standby failover              # the real thing (asks once, before renting; run it in tmux/screen)
+git clone https://github.com/SolanaVault/on-demand-standby /opt/src/ods && cd /opt/src/ods
+sudo ./install.sh                     # code -> /opt/ods, config skeleton, SSH key, watchdog timer
+sudo $EDITOR /etc/ods/ods.conf
+echo '<cherry api token>' | sudo tee /etc/ods/cherry-api-token >/dev/null; sudo chmod 600 /etc/ods/cherry-api-token
+sudo ods doctor                # checks everything, changes nothing, spends nothing
+sudo ods stock                 # qualified types in stock right now, cheapest first
+sudo ods failover              # the real thing (asks once, before renting; run it in tmux/screen)
 #   ... your maintenance on the primary ...
-sudo fd-standby failback --wait       # waits until the primary is caught up, moves back, deletes the standby
+sudo ods failback --wait       # waits until the primary is caught up, moves back, deletes the standby
 ```
 
 Other commands: `status`, `up`, `down`, `qualify PROVIDER PLAN REGION`, `qualify-queue`,
-`watchdog`, and `fd-standby-swap {status|to-standby|to-primary|rehearse} HOST [--dry-run]`.
+`watchdog`, and `ods-swap {status|to-standby|to-primary|rehearse} HOST [--dry-run]`.
 
 ## How it works
 
@@ -189,7 +209,7 @@ Other commands: `status`, `up`, `down`, `qualify PROVIDER PLAN REGION`, `qualify
 - **Standby setup** (`standby/standby-init.sh`): hardware check → firewall first (SSH only from
   the primary; automatic rollback unless a new login works) → data disks by discovery, labelled
   and mounted by label → Firedancer, sysctl, CPU governor, units → start, wait until caught up.
-- **Swap** (`bin/fd-standby-swap`): wait for a safe window → old voter to junk →
+- **Swap** (`bin/ods-swap`): wait for a safe window → old voter to junk →
   copy its vote history → new voter `set-identity` with that history and the staked key. Before
   every staked switch the other node must report a non-staked identity. Everything client-specific
   lives in `lib/primary-*.sh` (this machine) and `lib/standby-*.sh` (the rented one).
@@ -230,7 +250,7 @@ self-fetch may use them too. No source answers: the validator fetches its own as
 [snappie.sh](https://snappie.sh) as the only trusted source
 (`[snapshots.sources.gossip] allow_any = false`, `allow_list = ["snappie..."]` in the primary
 config, which the standby inherits) and raise the TCP receive window
-(`standby/60-fd-tcp-rmem.conf`). Cold restart to caught up: 2–3 minutes on the qualified types.
+(`standby/60-ods-tcp-rmem.conf`). Cold restart to caught up: 2–3 minutes on the qualified types.
 
 ## Costs (Cherry, Nov 2026)
 
@@ -247,7 +267,7 @@ out of them.
 ## Not covered
 
 - **Unplanned crashes.** Renting and syncing a standby takes ~20 minutes; a crashed primary
-  restarts faster on its own (systemd). fd-standby is for planned maintenance.
+  restarts faster on its own (systemd). ods is for planned maintenance.
 - **Hardware loss of the primary.** Use the same tooling to build a replacement, but that is a
   manual decision.
 - **Frankendancer** primaries, and an Agave standby for a Firedancer primary.

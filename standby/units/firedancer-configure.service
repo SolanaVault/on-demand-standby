@@ -1,5 +1,5 @@
 [Unit]
-Description=Firedancer host configuration (fd-standby)
+Description=Firedancer host configuration (ods)
 After=local-fs.target network-online.target
 Wants=network-online.target
 RequiresMountsFor=@LED_MNT@ @ACC_MNT@

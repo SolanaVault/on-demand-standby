@@ -1,5 +1,5 @@
 [Unit]
-Description=Firedancer validator (fd-standby)
+Description=Firedancer validator (ods)
 After=firedancer-configure.service network-online.target
 Requires=firedancer-configure.service
 Wants=network-online.target

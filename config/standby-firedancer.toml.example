@@ -1,17 +1,17 @@
 # Firedancer config TEMPLATE for a FIREDANCER standby of an AGAVE primary
 # (PRIMARY_CLIENT=agave, STANDBY_CLIENT=firedancer). The default for an Agave primary is an Agave
 # standby, which does not need this file.
-# Copy to /etc/fd-standby/standby-firedancer.toml, fill it in once, and set STANDBY_FD_TEMPLATE.
+# Copy to /etc/ods/standby-firedancer.toml, fill it in once, and set STANDBY_FD_TEMPLATE.
 # A Firedancer primary does not need this file: its standby config is derived from its own TOML.
 #
 # Best starting point: a WORKING mainnet config of the same Firedancer build as STANDBY_FD_BIN
-# (e.g. from another validator you run on Firedancer), not this file. fd-standby only needs it to
-# be valid for that binary; every key below other than the ones marked "fd-standby" is plain
+# (e.g. from another validator you run on Firedancer), not this file. ods only needs it to
+# be valid for that binary; every key below other than the ones marked "ods" is plain
 # Firedancer configuration: check it against the default config of YOUR build, key names change
 # between versions.
 #
-# `fd-standby bundle` ALWAYS overrides, so leave them out or at any value:
-#   [paths] identity_key   -> a junk key generated on the standby (staked only via fd-standby-swap)
+# `ods bundle` ALWAYS overrides, so leave them out or at any value:
+#   [paths] identity_key   -> a junk key generated on the standby (staked only via ods-swap)
 #   [paths] base / snapshots / accounts, [log] path -> standby disk layout
 #   [paths] vote_history   -> removed (default: inside base)
 #   [net] interface / provider -> discovered NIC, socket provider
@@ -21,11 +21,11 @@
 # Jito (--block-engine-url) -> [tiles.bundle]; Jito BAM (--bam-url) -> a BAM-capable build (FireBAM)
 # and its BAM settings; Harmonic -> Harmonic's Firedancer build (Samba) and its [tiles.bundle] keys;
 # --shred-receiver-address -> [tiles.shred] additional_shred_destinations_leader. None of them on the
-# primary -> none here. `fd-standby doctor` compares the providers of both. Any region will do: the
+# primary -> none here. `ods doctor` compares the providers of both. Any region will do: the
 # standby re-points them to the region closest to itself (config/regional-endpoints.conf).
 
-name = "fd1"              # fd-standby: standby layout uses /mnt/fd-ledger/<name>
-user = "firedancer"       # fd-standby: created on the standby; owns ledger, keys, vote history
+name = "fd1"              # ods: standby layout uses /mnt/ods-ledger/<name>
+user = "firedancer"       # ods: created on the standby; owns ledger, keys, vote history
 
 [paths]
     # Your vote account (as your Firedancer version expects it: check its default config).
@@ -44,4 +44,4 @@ user = "firedancer"       # fd-standby: created on the standby; owns ledger, key
     ]
 
 [tiles.metric]
-    prometheus_listen_port = 7999   # fd-standby: status/lag of the standby are read here (over SSH)
+    prometheus_listen_port = 7999   # ods: status/lag of the standby are read here (over SSH)

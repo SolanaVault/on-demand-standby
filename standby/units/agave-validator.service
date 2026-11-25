@@ -1,6 +1,6 @@
 [Unit]
-Description=Agave validator (fd-standby)
-After=network-online.target fd-cpu-governor.service
+Description=Agave validator (ods)
+After=network-online.target ods-cpu-governor.service
 Wants=network-online.target
 RequiresMountsFor=@LED_MNT@ @ACC_MNT@
 StartLimitIntervalSec=1800
@@ -9,7 +9,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=@USER@
-# The command line is the primary's (see `fd-standby bundle`) with --identity = the JUNK key:
+# The command line is the primary's (see `ods bundle`) with --identity = the JUNK key:
 # a crash or restart always comes back unstaked.
 ExecStart=/opt/agave/standby-validator.sh
 Restart=on-failure

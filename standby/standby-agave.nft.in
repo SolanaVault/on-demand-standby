@@ -20,7 +20,7 @@ table inet filter {
     ct state established,related accept
     iif "lo" accept
     meta l4proto { icmp, ipv6-icmp } accept
-    ip saddr { @SSH_SOURCES@ } tcp dport 22 accept comment "fd-standby: SSH from primary only"
+    ip saddr { @SSH_SOURCES@ } tcp dport 22 accept comment "ods: SSH from primary only"
     tcp dport @PORT_RANGE@ accept comment "gossip ip-echo and TCP services"
     udp dport @PORT_RANGE@ accept comment "Agave UDP/QUIC"
   }

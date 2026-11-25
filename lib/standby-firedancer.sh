@@ -30,8 +30,8 @@ s_load_config(){
   local out
   # Firedancer primary: derive from its TOML. Agave primary: the operator's template.
   : "${STANDBY_FD_TOML:=${STANDBY_FD_TEMPLATE:-}}"
-  [ -n "$STANDBY_FD_TOML" ] || { echo "set STANDBY_FD_TEMPLATE in $FDS_CONF (Firedancer standby of an $PRIMARY_CLIENT primary)" >&2; exit 2; }
-  [ -n "${STANDBY_FD_BIN:-}" ] || { echo "set STANDBY_FD_BIN in $FDS_CONF" >&2; exit 2; }
+  [ -n "$STANDBY_FD_TOML" ] || { echo "set STANDBY_FD_TEMPLATE in $ODS_CONF (Firedancer standby of an $PRIMARY_CLIENT primary)" >&2; exit 2; }
+  [ -n "${STANDBY_FD_BIN:-}" ] || { echo "set STANDBY_FD_BIN in $ODS_CONF" >&2; exit 2; }
   out=$(fd_toml_info "$STANDBY_FD_TOML" T) || { echo "cannot parse $STANDBY_FD_TOML" >&2; exit 2; }
   eval "$out"
   S_NAME=$T_NAME; S_USER=${T_USER:-firedancer}; S_METRICS_PORT=$T_METRICS_PORT
@@ -76,8 +76,8 @@ s_bundle(){ local d=$1 real rel
   real=$(readlink -f "$STANDBY_FD_BIN")
   rel=$(basename "$(dirname "$real")"); [ "$rel" = bin ] && rel="fd-$("$real" --version 9>&- 3<&- | awk 'NR==1{print $1}')"
   install -m 755 "$real" "$d/bin/firedancer"; echo "$rel" > "$d/bin/release"
-  cp "$FDS_ROOT/standby/standby.nft.in" "$d/standby.nft.in"
-  cp "$FDS_ROOT"/standby/units/firedancer*.service "$d/units/"
+  cp "$ODS_ROOT/standby/standby.nft.in" "$d/standby.nft.in"
+  cp "$ODS_ROOT"/standby/units/firedancer*.service "$d/units/"
   printf 'CONFIGURE_STAGES=%q\n' "$STANDBY_CONFIGURE_STAGES" >> "$d/config/standby.env"
   python3 -I - "$STANDBY_FD_TOML" "$d/config/standby.toml.in" "$S_LED_MNT" "$S_ACC_MNT" "$S_JUNK_KEY" "${STANDBY_DROP_MULTICAST:-1}" <<'PY' || return 1
 import re, sys
@@ -96,15 +96,15 @@ def setkey(section, key, value, comment):
     pat = r'(?m)^[ \t]*' + re.escape(key) + r'[ \t]*=.*$'
     body = re.sub(pat, line, body, count=1) if re.search(pat, body) else '\n' + line + body
     s = s[:m.end()] + body + s[end:]
-setkey('paths', 'identity_key', junk, 'fd-standby: junk; staked only via fd-standby-swap')
-setkey('paths', 'base', led + '/{name}', 'fd-standby: standby layout')
-setkey('paths', 'snapshots', led + '/{name}/snapshots', 'fd-standby: standby layout')
-setkey('paths', 'accounts', acc + '/accounts.db', 'fd-standby: standby layout')
+setkey('paths', 'identity_key', junk, 'ods: junk; staked only via ods-swap')
+setkey('paths', 'base', led + '/{name}', 'ods: standby layout')
+setkey('paths', 'snapshots', led + '/{name}/snapshots', 'ods: standby layout')
+setkey('paths', 'accounts', acc + '/accounts.db', 'ods: standby layout')
 for k in ('vote_history',):
     s = re.sub(r'(?m)^[ \t]*' + k + r'[ \t]*=.*\n', '', s)
-setkey('log', 'path', led + '/{name}/firedancer.log', 'fd-standby: standby layout')
-setkey('net', 'interface', '@IFACE@', 'fd-standby: discovered on the standby')
-setkey('net', 'provider', 'socket', 'fd-standby: socket works on any NIC')
+setkey('log', 'path', led + '/{name}/firedancer.log', 'ods: standby layout')
+setkey('net', 'interface', '@IFACE@', 'ods: discovered on the standby')
+setkey('net', 'provider', 'socket', 'ods: socket works on any NIC')
 if dropmc == '1':
     def drop(m):
         items = [x for x in re.findall(r'"([^"]+)"', m.group(2)) if not 224 <= int(x.split('.')[0]) <= 239]

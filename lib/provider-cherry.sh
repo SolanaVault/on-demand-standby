@@ -23,7 +23,7 @@ for k in json.load(sys.stdin):
     if " ".join(k.get("key","").split()[:2])==pub: print(k["id"]); break' "$pub")
   if [ -z "$id" ]; then
     # labels must be unique per account: one per key (fingerprint), never reuse another key's label
-    local label; label="fd-standby-$(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}' | sed 's/^SHA256://' | tr -dc 'A-Za-z0-9' | cut -c1-12)"
+    local label; label="ods-$(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}' | sed 's/^SHA256://' | tr -dc 'A-Za-z0-9' | cut -c1-12)"
     id=$(ch -X POST "$CH_API/ssh-keys" -d "{\"label\":\"$label\",\"key\":\"$(cat "$SSH_KEY.pub")\"}" | python3 -I -c 'import json,sys
 d=json.load(sys.stdin); i=d.get("id") if isinstance(d,dict) else None
 if isinstance(i,int) and i>0 and not d.get("code"): print(i)
@@ -59,7 +59,7 @@ for p in json.load(sys.stdin):
         sys.exit(0 if n==2 and all(s.get("size",0)<2000 for s in st) else 1)
 sys.exit(1)' "$plan"; then part=",\"os_partition_size\":${CHERRY_OS_PARTITION_GB:-50}"; say "cherry: 2-disk plan -> OS partition ${CHERRY_OS_PARTITION_GB:-50} GB"; fi
   for img in $CHERRY_IMAGES; do
-    r=$(ch -X POST "$CH_API/projects/$CHERRY_PROJECT_ID/servers" -d "{\"plan\":\"$plan\",\"region\":\"$region\",\"image\":\"$img\",\"hostname\":\"$host\",\"ssh_keys\":[\"$kid\"],\"spot_market\":false,\"cycle\":\"hourly\"$part,\"tags\":{\"role\":\"fd-standby\",\"owner\":\"$FDS_OWNER_TAG\"}}")
+    r=$(ch -X POST "$CH_API/projects/$CHERRY_PROJECT_ID/servers" -d "{\"plan\":\"$plan\",\"region\":\"$region\",\"image\":\"$img\",\"hostname\":\"$host\",\"ssh_keys\":[\"$kid\"],\"spot_market\":false,\"cycle\":\"hourly\"$part,\"tags\":{\"role\":\"ods\",\"owner\":\"$ODS_OWNER_TAG\"}}")
     # error answers carry "id": 0 too ({"id":0,"code":400,"message":...}): only a positive id is a server
     id=$(echo "$r" | python3 -I -c 'import json,sys
 d=json.load(sys.stdin); i=d.get("id") if isinstance(d,dict) else None
@@ -86,9 +86,9 @@ cherry_list_tagged(){
 owner=sys.argv[1]
 for s in json.load(sys.stdin):
     t=s.get("tags") or {}
-    if t.get("role")=="fd-standby" and t.get("owner")==owner:   # only OUR standbys
+    if t.get("role")=="ods" and t.get("owner")==owner:   # only OUR standbys
         ip=[i["address"] for i in s.get("ip_addresses",[]) if i["type"]=="primary-ip"]
         c=s.get("created_at")   # missing while a server is still deploying: treat as brand new
         t=int(datetime.datetime.fromisoformat(c).timestamp()) if c else int(datetime.datetime.now().timestamp())
-        print("cherry", s["id"], ip[0] if ip else "-", t)' "$FDS_OWNER_TAG"
+        print("cherry", s["id"], ip[0] if ip else "-", t)' "$ODS_OWNER_TAG"
 }

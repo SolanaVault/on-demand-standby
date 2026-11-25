@@ -1,0 +1,6 @@
+[Unit]
+Description=ods watchdog: alert on / delete forgotten standbys (never one holding the staked identity)
+[Service]
+SuccessExitStatus=75
+Type=oneshot
+ExecStart=/opt/ods/bin/ods watchdog

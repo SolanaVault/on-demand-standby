@@ -24,11 +24,11 @@
 #   p_unprepare_staked     undo p_prepare_staked
 #   p_wait                 block until a safe window (no own leader slot soon), bounded by a timeout
 #   p_status_extra         extra fields for status lines
-#   p_doctor               client-specific doctor checks (uses chk from bin/fd-standby)
+#   p_doctor               client-specific doctor checks (uses chk from bin/ods)
 #   p_setid_hint KEY       manual command that switches the primary to KEY (for alert texts)
 
 p_load_config(){
-  : "${PRIMARY_FD_CONFIG:?set PRIMARY_FD_CONFIG in $FDS_CONF}" "${FD_BIN:?set FD_BIN in $FDS_CONF}"
+  : "${PRIMARY_FD_CONFIG:?set PRIMARY_FD_CONFIG in $ODS_CONF}" "${FD_BIN:?set FD_BIN in $ODS_CONF}"
   local out
   out=$(fd_toml_info "$PRIMARY_FD_CONFIG" P) || { echo "cannot parse $PRIMARY_FD_CONFIG" >&2; exit 2; }
   eval "$out"

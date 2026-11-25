@@ -2,11 +2,11 @@
 # Hot-swap the STAKED identity between this primary and a standby over SSH (each Firedancer or
 # Agave: PRIMARY_CLIENT / STANDBY_CLIENT, driven through lib/primary-*.sh and lib/standby-*.sh).
 #
-#   fd-standby-swap status     HOST
-#   fd-standby-swap to-standby HOST [--dry-run] [--yes] [--verify=SECONDS]
-#   fd-standby-swap to-primary HOST [--dry-run] [--yes] [--verify=SECONDS]
-#   fd-standby-swap rehearse   HOST        standby only, throwaway keys: junk -> rehearsal key -> junk
-#   fd-standby-swap shred-key  HOST        remove any staked key copy from the standby
+#   ods-swap status     HOST
+#   ods-swap to-standby HOST [--dry-run] [--yes] [--verify=SECONDS]
+#   ods-swap to-primary HOST [--dry-run] [--yes] [--verify=SECONDS]
+#   ods-swap rehearse   HOST        standby only, throwaway keys: junk -> rehearsal key -> junk
+#   ods-swap shred-key  HOST        remove any staked key copy from the standby
 #
 # Exit codes: 0 done | 20 refused, NOTHING was changed (safe to retry) |
 #             21 identities changed and the swap could not be completed: the script restored what
@@ -24,7 +24,7 @@
 set -uo pipefail
 # shellcheck source=../lib/common.sh
 . "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
-fds_load_config
+ods_load_config
 
 CMD=${1:-}; HOST=${2:-}; shift 2 2>/dev/null || true
 DRY=0; YES=0; VERIFY=60
@@ -32,10 +32,10 @@ for a in "$@"; do case "$a" in --dry-run) DRY=1;; --yes) YES=1;; --verify=*) VER
 [ -n "$CMD" ] && [ -n "$HOST" ] || { sed -n 2,21p "$0"; exit 2; }
 valid_ip "$HOST" || { echo "not an IPv4 address: $HOST"; exit 2; }
 [[ "$VERIFY" =~ ^[0-9]+$ ]] || { echo "bad --verify"; exit 2; }
-case "$CMD" in status) ;; *) fds_lock_or_exit ;; esac   # one mutating operation at a time
+case "$CMD" in status) ;; *) ods_lock_or_exit ;; esac   # one mutating operation at a time
 # the logger runs in its own session (no Ctrl-C / terminal hangup reaches it) and keeps writing
 # the file if the terminal goes away (tee -p)
-exec > >(exec setsid tee -p -a "$FDS_STATE_DIR/swap.log") 2>&1
+exec > >(exec setsid tee -p -a "$ODS_STATE_DIR/swap.log") 2>&1
 EX_REFUSED=20; EX_CHANGED=21
 
 S_KEYDIR=$(dirname "$S_STAKED_KEY")
@@ -48,7 +48,7 @@ votor_gap(){ local dir=$1 a b
   [[ "$a" =~ ^[0-9.]+$ && "$b" =~ ^[0-9.]+$ ]] && echo "  votor gap $(python3 -c "print('%.2f s' % (float('$b') - float('$a')))") (old voter's votor switched away -> new voter's votor switched in; clocks NTP-synced)"; }
 # one SSH connection to the standby for the whole run (see sshs): inside the voting gap every
 # remote step then costs ~1 round trip instead of ~6
-if [ -w /run ]; then export FDS_SSH_MUX=/run/fds-mux-$$; else export FDS_SSH_MUX=/tmp/fds-mux-$UID-$$; fi
+if [ -w /run ]; then export ODS_SSH_MUX=/run/ods-mux-$$; else export ODS_SSH_MUX=/tmp/ods-mux-$UID-$$; fi
 
 ok(){ printf '  OK %s\n' "$*"; }
 refuse(){ say "REFUSED (nothing changed): $*"; alert "swap refused (nothing changed): $*"; exit $EX_REFUSED; }
@@ -82,7 +82,7 @@ changed(){  # identities were touched and the swap is not complete: report the A
   case "$st" in
     *primary=staked*standby=staked*) alert "BOTH NODES STAKED ($st) - switch one to junk NOW";;
     *primary=staked*|*standby=staked*) alert "swap incomplete but one node votes: $st ($*)";;
-    *) alert "NOBODY IS VOTING ($st) after: $* - restore manually: fd-standby-swap status $HOST";;
+    *) alert "NOBODY IS VOTING ($st) after: $* - restore manually: ods-swap status $HOST";;
   esac
   exit $EX_CHANGED; }
 
@@ -107,7 +107,7 @@ push_key(){
   sshs "$HOST" "umask 077; cat > $(q "$S_STAKED_KEY").tmp && mv $(q "$S_STAKED_KEY").tmp $(q "$S_STAKED_KEY")" < "$PRIMARY_STAKED_KEY" || return 1
   [ "$(keypub_remote "$HOST" "$S_STAKED_KEY" </dev/null)" = "$STAKED_PUBKEY" ]
 }
-standby_firewall_ok(){ sb "nft list ruleset 2>/dev/null | grep -c 'fd-standby: SSH from primary only' >/dev/null && nft list chain inet filter input 2>/dev/null | grep -c 'policy drop' >/dev/null"; }
+standby_firewall_ok(){ sb "nft list ruleset 2>/dev/null | grep -c 'ods: SSH from primary only' >/dev/null && nft list chain inet filter input 2>/dev/null | grep -c 'policy drop' >/dev/null"; }
 
 # ------------------------------------------------------------------ vote history
 # The history we hand over must have been written by THIS switch and be final: p_vh_fresh /
@@ -121,7 +121,7 @@ wait_fresh(){ local f=$1 t=$2 i; for ((i=0; i<75; i++)); do $f "$t" && return 0;
 # call. Exit 98 = not fresh, 99 = changed while copied (both: nothing usable was sent).
 s_vh_export_cmd(){ local f; f=$(printf %q "$(s_vh_file)")
   echo "ok=0; for i in \$(seq 1 75); do if $(s_vh_fresh_cmd "$1") >/dev/null 2>&1; then ok=1; break; fi; sleep 0.2; done; [ \$ok = 1 ] || exit 98
-a=\$($(s_vh_fp_cmd)); t=\$(mktemp $(printf %q "$(dirname "$(s_vh_file)")")/.fds-export.XXXXXX) || exit 97; cp $f \"\$t\" || { rm -f \"\$t\"; exit 97; }
+a=\$($(s_vh_fp_cmd)); t=\$(mktemp $(printf %q "$(dirname "$(s_vh_file)")")/.ods-export.XXXXXX) || exit 97; cp $f \"\$t\" || { rm -f \"\$t\"; exit 97; }
 b=\$($(s_vh_fp_cmd)); [ -n \"\$a\" ] && [ \"\$a\" = \"\$b\" ] || { rm -f \"\$t\"; exit 99; }
 cat \"\$t\"; rc=\$?; rm -f \"\$t\"; exit \$rc"; }
 
@@ -210,7 +210,7 @@ to_standby(){
   say "3/5 primary: switch to junk (voting stops)"
   # everything read for the switch is read BEFORE voting stops (none of it changes in between)
   local t0 t spid dst snap fp; spid=$(s_pid); dst=$(s_vh_incoming); type p_log_cache >/dev/null 2>&1 && p_log_cache
-  snap=$(mktemp "$FDS_STATE_DIR/vh-snap.XXXXXX") || refuse "cannot create a temp file in $FDS_STATE_DIR"
+  snap=$(mktemp "$ODS_STATE_DIR/vh-snap.XXXXXX") || refuse "cannot create a temp file in $ODS_STATE_DIR"
   t0=$(date +%s.%N); t=$(date +%s)
   trap '' INT HUP TERM PIPE   # critical section: finish or roll back, never just stop halfway
   p_setid "$P_JUNK_KEY"
@@ -240,7 +240,7 @@ $(s_setid_cmd --vote-history-file "$dst" "$S_STAKED_KEY")" < "$snap"; local src=
   ok "standby runs $STAKED_PUBKEY"
   votor_gap to-standby
   for i in $(seq 1 $((VERIFY/10))); do sleep 10; echo "  t+$((i*10))s standby=$(stable s_state) $(s_status_extra "$HOST") vote=[$(vote_state)]"; done
-  votes_advancing || { alert "standby $HOST runs the staked identity but its votes are NOT observed on chain - do NOT take the primary down; check: fd-standby-swap status $HOST"; exit $EX_CHANGED; }
+  votes_advancing || { alert "standby $HOST runs the staked identity but its votes are NOT observed on chain - do NOT take the primary down; check: ods-swap status $HOST"; exit $EX_CHANGED; }
   ok "votes from the standby observed on chain"
 }
 
@@ -298,7 +298,7 @@ to_primary(){
   s_shred_key && ok "standby key shredded (verified)"
   [ "$(stable s_state)" = junk ] && sb "$(s_unprepare_cmd)" >/dev/null 2>&1 && ok "staked key no longer an authorized voter on the standby"
   for i in $(seq 1 $((VERIFY/10))); do sleep 10; echo "  t+$((i*10))s primary=$(stable p_state) $(p_status_extra) vote=[$(vote_state)]"; done
-  votes_advancing || { alert "this primary runs the staked identity but its votes are NOT observed on chain - check now: fd-standby-swap status $HOST"; exit $EX_CHANGED; }
+  votes_advancing || { alert "this primary runs the staked identity but its votes are NOT observed on chain - check now: ods-swap status $HOST"; exit $EX_CHANGED; }
   ok "votes from this primary observed on chain"
 }
 

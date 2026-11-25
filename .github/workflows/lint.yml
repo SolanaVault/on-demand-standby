@@ -10,9 +10,9 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck -x -S warning bin/fd-standby bin/fd-standby-swap lib/*.sh standby/standby-init.sh standby/fds-node install.sh
+          shellcheck -x -S warning bin/ods bin/ods-swap lib/*.sh standby/standby-init.sh standby/ods-node install.sh
       - name: bash syntax
-        run: for f in bin/* lib/*.sh standby/standby-init.sh standby/fds-node install.sh; do bash -n "$f"; done
+        run: for f in bin/* lib/*.sh standby/standby-init.sh standby/ods-node install.sh; do bash -n "$f"; done
       - name: python helpers compile
         run: python3 -m py_compile tools/render-qualified.py standby/localize-endpoints.py
       - name: standby Firedancer template is valid TOML

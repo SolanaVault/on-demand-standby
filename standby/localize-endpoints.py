@@ -9,7 +9,7 @@ THIS machine. Table and rules: config/regional-endpoints.conf.
 
 FILE: `args` = one command-line argument per line; `toml` = a Firedancer config (only string
 values are touched, the formatting stays). All FILEs share one choice per provider.
-FDS_RTT_FILE (tests): "host rtt_ms" lines used instead of measuring.
+ODS_RTT_FILE (tests): "host rtt_ms" lines used instead of measuring.
 """
 import concurrent.futures, ipaddress, os, re, socket, subprocess, sys, time
 
@@ -84,7 +84,7 @@ class Localizer:
         return sorted(g for g in regs if all(self.hosts(p, role, g) for role in roles))
 
 def rtt_ms(host):
-    fake = os.environ.get('FDS_RTT_FILE')
+    fake = os.environ.get('ODS_RTT_FILE')
     if fake:
         for ln in open(fake):
             h, *v = ln.split()

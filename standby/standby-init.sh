@@ -14,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck disable=SC1091
-. config/standby.env      # CLIENT, FD_USER, FD_NAME, ... (written by `fd-standby bundle`)
+. config/standby.env      # CLIENT, FD_USER, FD_NAME, ... (written by `ods bundle`)
 CLIENT=${CLIENT:-firedancer}
 # Regional endpoints (Jito, BAM, Harmonic, ...): the region closest to THIS machine, per provider
 # (config/regional-endpoints.conf). Only endpoints the primary uses are changed; nothing is added.
@@ -22,10 +22,10 @@ localize(){ local fmt=$1; shift
   python3 -I ./localize-endpoints.py config/regional-endpoints.conf "$fmt" "$@" ${REGIONS:+--force "$REGIONS"} 2>&1 | while read -r l; do log "endpoints: $l"; done
   return "${PIPESTATUS[0]}"; }
 
-# Stages (run in this order by fd-standby, each in its own SSH call):
+# Stages (run in this order by ods, each in its own SSH call):
 #   --check-only   hardware/disk/network checks, changes nothing
 #   --firewall     load the firewall (SSH only from the primary) + 3 min automatic rollback,
-#                  which the caller cancels by touching /run/fd-standby-fw-ok from a NEW login
+#                  which the caller cancels by touching /run/ods-fw-ok from a NEW login
 #   --setup        everything else; refuses unless the firewall was confirmed
 PRIMARY_IP=""; EXTRA_SSH=""; MODE=""
 while [ $# -gt 0 ]; do case "$1" in
@@ -73,7 +73,7 @@ log "net: default route via $IFACE ($PUBIP)"
 
 # ------------------------------------------------------------------ 3. disk discovery
 # Already mounted from a previous run? Then reuse.
-ACC_MNT=/mnt/fd-accounts; LED_MNT=/mnt/fd-ledger
+ACC_MNT=/mnt/ods-accounts; LED_MNT=/mnt/ods-ledger
 if findmnt -n "$ACC_MNT" >/dev/null && findmnt -n "$LED_MNT" >/dev/null; then
   LAYOUT=existing
 else
@@ -144,29 +144,29 @@ export DEBIAN_FRONTEND=noninteractive
 command -v nft >/dev/null && command -v mkfs.xfs >/dev/null || { apt-get -qq update; apt-get -qq install -y nftables xfsprogs >/dev/null; }
 
 # ------------------------------------------------------------------ 4. firewall (own stage)
-fw_active(){ nft list ruleset 2>/dev/null | grep -c 'fd-standby: SSH from primary only' >/dev/null; }
+fw_active(){ nft list ruleset 2>/dev/null | grep -c 'ods: SSH from primary only' >/dev/null; }
 if [ "$MODE" = firewall ]; then
-  rm -f /run/fd-standby-fw-ok
+  rm -f /run/ods-fw-ok
   sed -e "s#@SSH_SOURCES@#$PRIMARY_IP${EXTRA_SSH:+, $EXTRA_SSH}#" standby.nft.in > /etc/nftables.conf
   nft -c -f /etc/nftables.conf
-  nft list ruleset > /run/fd-standby-nft-prev 2>/dev/null || true
+  nft list ruleset > /run/ods-nft-prev 2>/dev/null || true
   # safety net: restore the previous ruleset unless a NEW login confirms within 3 minutes
-  nohup sh -c 'sleep 180; [ -e /run/fd-standby-fw-ok ] || { nft flush ruleset; nft -f /run/fd-standby-nft-prev; }' >/dev/null 2>&1 &
+  nohup sh -c 'sleep 180; [ -e /run/ods-fw-ok ] || { nft flush ruleset; nft -f /run/ods-nft-prev; }' >/dev/null 2>&1 &
   nft -f /etc/nftables.conf; systemctl enable -q nftables
   log "firewall loaded (SSH only from $PRIMARY_IP${EXTRA_SSH:+, $EXTRA_SSH}); waiting for confirmation"
   echo "RESULT {\"ok\":true,\"stage\":\"firewall\"}"; exit 0
 fi
-[ -e /run/fd-standby-fw-ok ] && fw_active || fail "firewall not confirmed/active - run --firewall and confirm first"
+[ -e /run/ods-fw-ok ] && fw_active || fail "firewall not confirmed/active - run --firewall and confirm first"
 id "$FD_USER" >/dev/null 2>&1 || useradd -r -m -d "/home/$FD_USER" -s /usr/sbin/nologin "$FD_USER"
 # the staked key will live in /run (tmpfs): no swap, so it can never be paged to disk
-swapoff -a; sed -i -E 's@^([^#].*\sswap\s.*)$@# fd-standby: \1@' /etc/fstab
+swapoff -a; sed -i -E 's@^([^#].*\sswap\s.*)$@# ods: \1@' /etc/fstab
 
 # ------------------------------------------------------------------ 6. disks
 # "free:DISK:START:SECTORS" -> append ONE partition exactly there, print its device path
 make_part(){ local disk start sectors line part
   IFS=: read -r _ disk start sectors <<< "$1"
   sfdisk -F "$disk" | grep -Eq "^\s*$start\s+[0-9]+\s+$sectors\s" || fail "free region on $disk changed - not partitioning"
-  sfdisk -d "$disk" > "/root/fd-standby-sfdisk-$(basename "$disk").before"          # backup of the table
+  sfdisk -d "$disk" > "/root/ods-sfdisk-$(basename "$disk").before"          # backup of the table
   echo "start=$start, size=$sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4" | sfdisk --append --no-reread -q "$disk" >/dev/null \
     || fail "sfdisk --append failed on $disk"
   partx -a "$disk" 2>/dev/null || true; udevadm settle
@@ -179,16 +179,16 @@ mkfs_label(){ local dev=$1 label=$2
 fstab(){ grep -q "LABEL=$1 " /etc/fstab || echo "LABEL=$1 $2 xfs noatime,nofail 0 0" >> /etc/fstab; }
 case "$LAYOUT" in
   existing) ;;
-  two-disks) mkfs_label "$ACC_DEV" fd-accounts; mkfs_label "$LED_DEV" fd-ledger; fstab fd-accounts $ACC_MNT; fstab fd-ledger $LED_MNT ;;
+  two-disks) mkfs_label "$ACC_DEV" ods-accounts; mkfs_label "$LED_DEV" ods-ledger; fstab ods-accounts $ACC_MNT; fstab ods-ledger $LED_MNT ;;
   one-disk|disk-plus-root)
-    mkfs_label "$ACC_DEV" fd-data; fstab fd-data /mnt/fd-data
-    mkdir -p /mnt/fd-data; systemctl daemon-reload; mount /mnt/fd-data
-    mkdir -p /mnt/fd-data/accounts /mnt/fd-data/ledger
+    mkfs_label "$ACC_DEV" ods-data; fstab ods-data /mnt/ods-data
+    mkdir -p /mnt/ods-data; systemctl daemon-reload; mount /mnt/ods-data
+    mkdir -p /mnt/ods-data/accounts /mnt/ods-data/ledger
     if [ $LAYOUT = one-disk ]; then
-      grep -q " $ACC_MNT " /etc/fstab || echo "/mnt/fd-data/accounts $ACC_MNT none bind,nofail 0 0" >> /etc/fstab
-      grep -q " $LED_MNT " /etc/fstab || echo "/mnt/fd-data/ledger $LED_MNT none bind,nofail 0 0" >> /etc/fstab
+      grep -q " $ACC_MNT " /etc/fstab || echo "/mnt/ods-data/accounts $ACC_MNT none bind,nofail 0 0" >> /etc/fstab
+      grep -q " $LED_MNT " /etc/fstab || echo "/mnt/ods-data/ledger $LED_MNT none bind,nofail 0 0" >> /etc/fstab
     else
-      grep -q " $ACC_MNT " /etc/fstab || echo "/mnt/fd-data/accounts $ACC_MNT none bind,nofail 0 0" >> /etc/fstab
+      grep -q " $ACC_MNT " /etc/fstab || echo "/mnt/ods-data/accounts $ACC_MNT none bind,nofail 0 0" >> /etc/fstab
     fi ;;
   root-only) ;;
 esac
@@ -202,7 +202,7 @@ log "accounts: $(findmnt -no SOURCE $ACC_MNT) ${ACC_FREE}G free | ledger: $(find
 if [ "$CLIENT" = agave ]; then
 # ------------------------------------------------------------------ 7a. Agave: binaries, identity, node helper
 AG=/opt/agave; REL=$AG/releases/$(cat bin/release)
-install -d -m 755 "$REL" /etc/agave /opt/fd-standby-node
+install -d -m 755 "$REL" /etc/agave /opt/ods-node
 install -m 755 bin/agave-validator bin/solana-keygen "$REL/"; ln -sfn "$REL" $AG/active
 # the same file capabilities as on the primary (setcap; a copy loses them)
 setcaps(){ local caps; caps=$(cat "$2" 2>/dev/null) || fail "no capabilities record $2 in the bundle"
@@ -219,17 +219,17 @@ for c in bin/companions/*; do [ -f "$c" ] || continue; [[ "$c" == *.caps ]] && c
   log "companion $n (runs next to the validator, as on the primary)"; done
 ver=$($AG/active/agave-validator --version 2>&1 | head -1 || true)
 [ "$ver" = "$(cat bin/version)" ] || fail "binary version mismatch ($ver vs $(cat bin/version))"
-install -m 755 node/fds-node /opt/fd-standby-node/fds-node
-install -m 644 node/primary-agave.sh node/node.env /opt/fd-standby-node/
-ln -sfn /opt/fd-standby-node/fds-node /usr/local/sbin/fds-node
-install -m 644 60-fd-tcp-rmem.conf 60-agave.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-fd-tcp-rmem.conf -p /etc/sysctl.d/60-agave.conf
+install -m 755 node/ods-node /opt/ods-node/ods-node
+install -m 644 node/primary-agave.sh node/node.env /opt/ods-node/
+ln -sfn /opt/ods-node/ods-node /usr/local/sbin/ods-node
+install -m 644 60-ods-tcp-rmem.conf 60-agave.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-ods-tcp-rmem.conf -p /etc/sysctl.d/60-agave.conf
 J=/home/$FD_USER/standby-identity.json
 if [ ! -e "$J" ]; then
-  $AG/active/solana-keygen new --no-bip39-passphrase --silent --force -o /root/fds-junk.json >/dev/null
-  install -m 600 -o "$FD_USER" -g "$FD_USER" /root/fds-junk.json "$J"; shred -u /root/fds-junk.json; fi
+  $AG/active/solana-keygen new --no-bip39-passphrase --silent --force -o /root/ods-junk.json >/dev/null
+  install -m 600 -o "$FD_USER" -g "$FD_USER" /root/ods-junk.json "$J"; shred -u /root/ods-junk.json; fi
 JUNK=$($AG/active/solana-keygen pubkey "$J")
 L=$LED_MNT/$FD_NAME
-# the primary's command line (one argument per line), made host-independent by `fd-standby bundle`
+# the primary's command line (one argument per line), made host-independent by `ods bundle`
 cp config/agave.args /etc/agave/standby.args
 grep -qx -- "--identity" /etc/agave/standby.args && grep -qxF -- "$J" /etc/agave/standby.args || fail "standby.args does not use the junk identity $J"
 shopt -s nullglob; LOC=(/etc/agave/standby.args /etc/agave/companions/*.args); shopt -u nullglob
@@ -280,7 +280,7 @@ install -m 644 units/*.service /etc/systemd/system/
 sed -i -e "s#@ACC_MNT@#$ACC_MNT#g" -e "s#@LED_MNT@#$LED_MNT#g" -e "s#@USER@#$FD_USER#g" /etc/systemd/system/agave-validator.service /etc/systemd/system/agave-companion@.service
 systemctl daemon-reload
 for c in /etc/agave/companions/*.args; do if [ -f "$c" ]; then systemctl enable -q "agave-companion@$(basename "$c" .args).service"; fi; done
-systemctl enable -q --now fd-cpu-governor.service
+systemctl enable -q --now ods-cpu-governor.service
 systemctl enable -q agave-validator.service
 systemctl reset-failed agave-validator.service 2>/dev/null; systemctl restart agave-validator.service   # a rerun: old failed starts must not hit StartLimitBurst
 sleep 15; systemctl is-active --quiet agave-validator || {
@@ -305,12 +305,12 @@ case "$ver" in *"$(cut -d- -f2 bin/release | tr -d v)"*) ;; *) fail "binary vers
 sed -e "s#@IFACE@#$IFACE#" config/standby.toml.in > /etc/firedancer/standby.toml
 localize toml /etc/firedancer/standby.toml || fail "cannot localize the regional endpoints"
 printf "FD_CONFIG=/etc/firedancer/standby.toml\nFD_CONFIGURE_STAGES=%s\n" "$CONFIGURE_STAGES" > /etc/default/firedancer
-install -m 644 60-fd-tcp-rmem.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-fd-tcp-rmem.conf
+install -m 644 60-ods-tcp-rmem.conf /etc/sysctl.d/; sysctl -q -p /etc/sysctl.d/60-ods-tcp-rmem.conf
 J=/home/$FD_USER/standby-identity.json
 if [ ! -e "$J" ]; then (cd /tmp && rm -f identity && /opt/firedancer/bin/firedancer keys new identity --config /etc/firedancer/standby.toml >/dev/null 2>&1); install -m 600 -o "$FD_USER" -g "$FD_USER" /tmp/identity "$J"; shred -u /tmp/identity; fi
 JUNK=$(cd /tmp && /opt/firedancer/bin/firedancer keys pubkey "$J" --config /etc/firedancer/standby.toml 2>/dev/null | tail -1)
-(cd /tmp && /opt/firedancer/bin/firedancer mem --config /etc/firedancer/standby.toml >/tmp/fd-mem.txt 2>&1) || fail "firedancer mem rejects the config"
-log "identity (junk): $JUNK | $(grep -E 'Total Memory Locked' /tmp/fd-mem.txt | xargs)"
+(cd /tmp && /opt/firedancer/bin/firedancer mem --config /etc/firedancer/standby.toml >/tmp/ods-mem.txt 2>&1) || fail "firedancer mem rejects the config"
+log "identity (junk): $JUNK | $(grep -E 'Total Memory Locked' /tmp/ods-mem.txt | xargs)"
 
 # ------------------------------------------------------------------ 8. host tuning + units
 for s in tuned irqbalance; do systemctl disable --now $s >/dev/null 2>&1 || true; done
@@ -318,7 +318,7 @@ install -m 644 units/*.service /etc/systemd/system/
 sed -i -e "s#@ACC_MNT@#$ACC_MNT#g" -e "s#@LED_MNT@#$LED_MNT#g" /etc/systemd/system/firedancer*.service
 sed -i "s#@ALL_CPUS@#0-$((threads-1))#" /etc/systemd/system/firedancer.service
 systemctl daemon-reload
-systemctl enable -q --now fd-cpu-governor.service
+systemctl enable -q --now ods-cpu-governor.service
 systemctl enable -q firedancer-configure.service firedancer.service
 systemctl restart firedancer-configure.service || { journalctl -u firedancer-configure -n 20 --no-pager; fail "configure failed"; }
 systemctl reset-failed firedancer.service 2>/dev/null; systemctl restart firedancer.service

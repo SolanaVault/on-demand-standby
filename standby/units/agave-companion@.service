@@ -1,8 +1,8 @@
 [Unit]
 # A program the primary runs next to its validator against the same ledger (e.g. Harmonic's
-# harmonic-scheduler): same binary, same arguments (see `fd-standby bundle`). Started and stopped
+# harmonic-scheduler): same binary, same arguments (see `ods bundle`). Started and stopped
 # with the validator.
-Description=Agave companion %i (fd-standby)
+Description=Agave companion %i (ods)
 After=agave-validator.service
 BindsTo=agave-validator.service
 RequiresMountsFor=@LED_MNT@

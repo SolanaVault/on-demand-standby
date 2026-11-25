@@ -1,6 +1,0 @@
-[Unit]
-Description=fd-standby watchdog: alert on / delete forgotten standbys (never one holding the staked identity)
-[Service]
-SuccessExitStatus=75
-Type=oneshot
-ExecStart=/opt/fd-standby/bin/fd-standby watchdog

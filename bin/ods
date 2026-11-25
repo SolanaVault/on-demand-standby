@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# fd-standby: rent an hourly bare-metal server, turn it into a caught-up standby (Firedancer or Agave),
+# ods: rent an hourly bare-metal server, turn it into a caught-up standby (Firedancer or Agave),
 # move the staked identity there (failover); later move it back and delete the server (failback).
 #
-#   fd-standby doctor                      check config, keys, APIs, primary; changes nothing
-#   fd-standby stock [--any]               in-stock candidates, cheapest first (--any: unqualified too)
-#   fd-standby bundle                      build the standby bundle (Firedancer binary + config, see README)
-#   fd-standby up [--plan P [--region R]]  rent + set up + wait until caught up (prints the IP)
-#   fd-standby status                      current standby, identities, tagged servers
-#   fd-standby down [--force]              shred any staked key on the standby, delete it, verify
-#   fd-standby failover [--yes]            up -> rehearse -> move the staked identity to the standby
-#   fd-standby failback [--wait]           primary ready (junk key, caught up) -> move the identity back
+#   ods doctor                      check config, keys, APIs, primary; changes nothing
+#   ods stock [--any]               in-stock candidates, cheapest first (--any: unqualified too)
+#   ods bundle                      build the standby bundle (Firedancer binary + config, see README)
+#   ods up [--plan P [--region R]]  rent + set up + wait until caught up (prints the IP)
+#   ods status                      current standby, identities, tagged servers
+#   ods down [--force]              shred any staked key on the standby, delete it, verify
+#   ods failover [--yes]            up -> rehearse -> move the staked identity to the standby
+#   ods failback [--wait]           primary ready (junk key, caught up) -> move the identity back
 #                                          -> shred the key copy -> delete the standby
-#   fd-standby qualify [--keep] PROVIDER PLAN REGION   prove a server type end to end (throwaway keys only);
+#   ods qualify [--keep] PROVIDER PLAN REGION   prove a server type end to end (throwaway keys only);
 #                                          --keep: a failure leaves the server for inspection, and the
 #                                          same command run again resumes on it
-#   fd-standby setup                       (re)run the setup on the recorded server (after a fix)
-#   fd-standby qualify-queue [--max N]     qualify every unqualified in-stock type (N per run)
-#   fd-standby watchdog                    (timer) alert on / delete forgotten standbys
+#   ods setup                       (re)run the setup on the recorded server (after a fix)
+#   ods qualify-queue [--max N]     qualify every unqualified in-stock type (N per run)
+#   ods watchdog                    (timer) alert on / delete forgotten standbys
 #
-# Safety model: see SAFETY.md. The staked key only moves inside fd-standby-swap.
+# Safety model: see SAFETY.md. The staked key only moves inside ods-swap.
 set -uo pipefail
 # shellcheck source=../lib/common.sh
 . "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
 # shellcheck source=../lib/provider-cherry.sh
-. "$FDS_ROOT/lib/provider-cherry.sh"
+. "$ODS_ROOT/lib/provider-cherry.sh"
 # shellcheck source=../lib/provider-vultr.sh
-. "$FDS_ROOT/lib/provider-vultr.sh"
-SWAP="$FDS_ROOT/bin/fd-standby-swap"
+. "$ODS_ROOT/lib/provider-vultr.sh"
+SWAP="$ODS_ROOT/bin/ods-swap"
 PROVIDERS="cherry vultr"
 
 # ------------------------------------------------------------------ candidates / stock
@@ -46,7 +46,7 @@ stock_lines(){
 }
 
 # ------------------------------------------------------------------ bundle
-BUNDLE_TGZ=$FDS_STATE_DIR/bundle.tgz
+BUNDLE_TGZ=$ODS_STATE_DIR/bundle.tgz
 # Firedancer standby: a Firedancer build + a config derived from the primary's TOML (Firedancer
 # primary) or from STANDBY_FD_TEMPLATE. Agave standby: the primary's own agave build and command
 # line (lib/standby-agave.sh). The client-specific part comes from s_bundle.
@@ -62,8 +62,8 @@ endpoint_plan(){ local d=$1 out
 bundle(){
   local d info; d=$(mktemp -d)
   mkdir -p "$d/bin" "$d/config" "$d/units"
-  cp "$FDS_ROOT/standby/standby-init.sh" "$FDS_ROOT/standby/localize-endpoints.py" "$FDS_ROOT/standby/60-fd-tcp-rmem.conf" "$d/"
-  cp "$FDS_ROOT/standby/units/fd-cpu-governor.service" "$d/units/"
+  cp "$ODS_ROOT/standby/standby-init.sh" "$ODS_ROOT/standby/localize-endpoints.py" "$ODS_ROOT/standby/60-ods-tcp-rmem.conf" "$d/"
+  cp "$ODS_ROOT/standby/units/ods-cpu-governor.service" "$d/units/"
   cp "$REGIONAL_ENDPOINTS" "$d/config/regional-endpoints.conf"
   printf 'CLIENT=%q\nFD_USER=%q\nFD_NAME=%q\nREGIONS=%q\n' "$STANDBY_CLIENT" "$S_USER" "$S_NAME" "${STANDBY_REGIONS:-}" > "$d/config/standby.env"
   info=$(s_bundle "$d") || { rm -rf "$d"; die "cannot build the $STANDBY_CLIENT standby bundle"; }
@@ -98,14 +98,14 @@ safe_to_delete(){ local ip=$1 st i
   valid_ip "$ip" || return 1
   # the standby of a failover holds the freshest vote history even if it crashed back to junk:
   # never delete it while this primary is not voting (see SAFETY.md "standby crashed")
-  [ -s "$FDS_STATE" ] && [ "$ip" = "$(state_get ip)" ] && [ "${FORCE:-0}" != 1 ] && return 1
+  [ -s "$ODS_STATE" ] && [ "$ip" = "$(state_get ip)" ] && [ "${FORCE:-0}" != 1 ] && return 1
   st=$(standby_state "$ip"); [ "$st" = junk ]; }
 
 # ------------------------------------------------------------------ up / down
 # Bring a created server to a caught-up standby. Prints its IP. Returns 2 when it failed BEFORE
 # anything was set up (not delivered, upload, hardware check, firewall): the caller deletes it and
 # tries the next candidate. Later failures die and leave the server for inspection.
-# Safe to run again on a server it already set up (`fd-standby setup`): every stage is re-runnable.
+# Safe to run again on a server it already set up (`ods setup`): every stage is re-runnable.
 provision(){ local prov=$1 id=$2 plan=$3 region=$4 t0=$5 pip=$6 s ip="" w=0
   while :; do
     s=$("${prov}_state" "$id" </dev/null); case "$s" in ready*) ip=${s#ready }; break;; gone) say "server $id vanished"; return 2;; esac
@@ -117,104 +117,104 @@ provision(){ local prov=$1 id=$2 plan=$3 region=$4 t0=$5 pip=$6 s ip="" w=0
     state_put "$prov" "$id" "$ip" "$plan" "$region" "$t0"
     # Providers reuse IPs: a NEW server may have the IP of an earlier one. Forget any old host key
     # for this IP now; the new key is pinned on first contact and verified on every later connection.
-    ssh-keygen -q -R "$ip" -f "$FDS_KNOWN_HOSTS" >/dev/null 2>&1 || true
+    ssh-keygen -q -R "$ip" -f "$ODS_KNOWN_HOSTS" >/dev/null 2>&1 || true
   fi
   for _ in $(seq 1 60); do sshs "$ip" true </dev/null 2>/dev/null && break; sleep 10; done
   say "delivered in $(( ($(date +%s)-t0)/60 )) min: $ip"
-  sshs "$ip" "rm -rf /root/fd-standby-bundle && mkdir -p /root/fd-standby-bundle && tar -C /root/fd-standby-bundle -xzf -" < "$BUNDLE_TGZ" \
+  sshs "$ip" "rm -rf /root/ods-bundle && mkdir -p /root/ods-bundle && tar -C /root/ods-bundle -xzf -" < "$BUNDLE_TGZ" \
     || { say "bundle upload failed"; return 2; }
-  init(){ SSHS_TIMEOUT=$SETUP_MAX_S sshs "$ip" "/root/fd-standby-bundle/standby-init.sh --primary-ip $pip ${STANDBY_EXTRA_SSH_SOURCES:+--extra-ssh $(printf %q "$STANDBY_EXTRA_SSH_SOURCES")} $1" </dev/null 2>&1 | tee -a "$FDS_LOG"; }
+  init(){ SSHS_TIMEOUT=$SETUP_MAX_S sshs "$ip" "/root/ods-bundle/standby-init.sh --primary-ip $pip ${STANDBY_EXTRA_SSH_SOURCES:+--extra-ssh $(printf %q "$STANDBY_EXTRA_SSH_SOURCES")} $1" </dev/null 2>&1 | tee -a "$ODS_LOG"; }
   init --check-only | grep '^RESULT {"ok":true' >/dev/null || { say "hardware check failed on $plan"; return 2; }
   # firewall FIRST, then confirm it with a NEW login right away (the box rolls it back after 3 min otherwise)
   init --firewall | grep -E '^\[|^RESULT' | tee >(cat >&2) | grep '^RESULT {"ok":true' >/dev/null || { say "firewall stage failed"; return 2; }
-  sshs "$ip" "touch /run/fd-standby-fw-ok" </dev/null || die "cannot SSH after loading the firewall (it rolls back in 3 min); server $prov $id left for inspection"
+  sshs "$ip" "touch /run/ods-fw-ok" </dev/null || die "cannot SSH after loading the firewall (it rolls back in 3 min); server $prov $id left for inspection"
   init --setup | grep -E '^\[|^RESULT' | tee >(cat >&2) | grep '^RESULT {"ok":true' >/dev/null \
-    || die "standby setup failed on $ip (left for inspection; fix, then: fd-standby setup | or delete: fd-standby down)"
+    || die "standby setup failed on $ip (left for inspection; fix, then: ods setup | or delete: ods down)"
   say "waiting for the standby to catch up"
   until s_caught_up "$ip" </dev/null 2>/dev/null; do
-    sleep 15; w=$((w+15)); ((w>CATCHUP_MAX_S)) && die "standby $ip did not catch up in $((CATCHUP_MAX_S/60)) min (left running: fd-standby down)"; done
+    sleep 15; w=$((w+15)); ((w>CATCHUP_MAX_S)) && die "standby $ip did not catch up in $((CATCHUP_MAX_S/60)) min (left running: ods down)"; done
   say "standby caught up (lag $(lag_of "$(s_slot "$ip" </dev/null)"))"
   say "standby ready: $prov $plan $region $ip (total $(( ($(date +%s)-t0)/60 )) min)"
   echo "$ip"; }
 
 # (re)run the setup on the recorded server: after a failed setup was fixed, or to resume
 setup_recorded(){
-  [ -s "$FDS_STATE" ] || die "no standby recorded"
+  [ -s "$ODS_STATE" ] || die "no standby recorded"
   local pip; pip=$(primary_ip); valid_ip "$pip" || die "cannot determine this primary's public IP"
   bundle
   provision "$(state_get provider)" "$(state_get id)" "$(state_get plan)" "$(state_get region)" "$(state_get created)" "$pip" \
-    || die "setup of the recorded server failed (see above); it is kept: fd-standby down to delete"; }
+    || die "setup of the recorded server failed (see above); it is kept: ods down to delete"; }
 
 up(){
-  if [ -s "$FDS_STATE" ]; then
+  if [ -s "$ODS_STATE" ]; then
     local sp sid sst; sp=$(state_get provider); sid=$(state_get id)
     sst=$("${sp}_state" "$sid" | cut -d' ' -f1)
     if [ "$sst" != gone ]; then
-      valid_ip "$(state_get ip)" || die "an unfinished standby exists ($sp $sid, no IP yet) - wait or run: fd-standby down"
+      valid_ip "$(state_get ip)" || die "an unfinished standby exists ($sp $sid, no IP yet) - wait or run: ods down"
       say "standby already exists: $sp $sid $(state_get ip)"; state_get ip; return 0; fi
-    rm -f "$FDS_STATE"
+    rm -f "$ODS_STATE"
   fi
   bundle
   local cands prov plan region price id t0 ip="" tc pip rc
   pip=$(primary_ip); valid_ip "$pip" || die "cannot determine this primary's public IP"
   if [ -n "${PLAN:-}" ]; then cands=$(ANY=1 stock_lines | awk -v p="$PLAN" -v r="${REGION:-}" '$2==p && (r=="" || $3==r)')
   else cands=$(stock_lines); fi
-  [ -n "$cands" ] || die "no qualified candidate in stock under $MAX_PRICE_PER_HOUR/h (try later, or: fd-standby stock --any)"
+  [ -n "$cands" ] || die "no qualified candidate in stock under $MAX_PRICE_PER_HOUR/h (try later, or: ods stock --any)"
   say "candidates in stock:"; echo "$cands" | sed 's/^/    /' >&2
   # fd 3: commands inside the loop (ssh!) must not consume the candidate list on stdin
   while read -r prov plan region price <&3; do
     say "creating $prov $plan in $region (~$price/h)"
     tc=$(date +%s)
-    id=$("${prov}_create" "$plan" "$region" "fd-standby-$(date -u +%m%d%H%M)" </dev/null)
+    id=$("${prov}_create" "$plan" "$region" "ods-$(date -u +%m%d%H%M)" </dev/null)
     if [ -z "$id" ]; then say "create failed, next candidate"; sleep 20; cleanup_orphans "$tc"; continue; fi
     t0=$(date +%s); ip=""; state_put "$prov" "$id" - "$plan" "$region" "$t0"
     say "created $prov server $id; waiting for delivery"
     rc=0; ip=$(provision "$prov" "$id" "$plan" "$region" "$t0" "$pip") || rc=$?
     [ $rc = 0 ] && { echo "$ip"; return 0; }
     [ $rc = 2 ] || exit $rc                     # failed during setup: server left for inspection
-    say "-> deleting, next candidate"; destroy_verified "$prov" "$id" </dev/null && rm -f "$FDS_STATE"
+    say "-> deleting, next candidate"; destroy_verified "$prov" "$id" </dev/null && rm -f "$ODS_STATE"
   done 3<<< "$cands"
   die "all candidates failed"
 }
 
 down(){
-  [ -s "$FDS_STATE" ] || { say "no standby in state file"; return 0; }
+  [ -s "$ODS_STATE" ] || { say "no standby in state file"; return 0; }
   local prov id ip; prov=$(state_get provider); id=$(state_get id); ip=$(state_get ip)
   if ! safe_to_delete "$ip"; then
-    [ "${FORCE:-0}" = 1 ] || die "standby $ip may hold the staked identity (state: $(standby_state "$ip")) and this primary is not staked - refusing. Fix first (fd-standby-swap status $ip), or --force"
+    [ "${FORCE:-0}" = 1 ] || die "standby $ip may hold the staked identity (state: $(standby_state "$ip")) and this primary is not staked - refusing. Fix first (ods-swap status $ip), or --force"
     alert "FORCED delete of standby $ip in state $(standby_state "$ip")"; fi
-  if valid_ip "$ip"; then sshs "$ip" "shred -u /run/fd-standby/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || alert "could not verify key removal on $ip before deletion (tmpfs, dies with the server)"; fi
+  if valid_ip "$ip"; then sshs "$ip" "shred -u /run/ods/* 2>/dev/null; test ! -e $S_STAKED_KEY" </dev/null 2>/dev/null || alert "could not verify key removal on $ip before deletion (tmpfs, dies with the server)"; fi
   destroy_verified "$prov" "$id" || die "server $id not confirmed gone (state file kept)"
-  valid_ip "$ip" && ssh-keygen -q -R "$ip" -f "$FDS_KNOWN_HOSTS" >/dev/null 2>&1
-  rm -f "$FDS_STATE_DIR/known_hosts.$prov-$id"
-  say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$FDS_STATE"
+  valid_ip "$ip" && ssh-keygen -q -R "$ip" -f "$ODS_KNOWN_HOSTS" >/dev/null 2>&1
+  rm -f "$ODS_STATE_DIR/known_hosts.$prov-$id"
+  say "ran $(( ($(date +%s)-$(state_get created))/60 )) min"; rm -f "$ODS_STATE"
 }
 
 list_tagged(){ local p rc=0; for p in $PROVIDERS; do "${p}_enabled" || continue; "${p}_list_tagged" || rc=1; done; return $rc; }
 
 both_staked_check(){ local ip; ip=$(state_get ip)
-  [ -s "$FDS_STATE" ] && valid_ip "$ip" && [ "$(p_id)" = "$STAKED_PUBKEY" ] && [ "$(standby_state "$ip")" = staked ] || return 0
+  [ -s "$ODS_STATE" ] && valid_ip "$ip" && [ "$(p_id)" = "$STAKED_PUBKEY" ] && [ "$(standby_state "$ip")" = staked ] || return 0
   alert "BOTH NODES STAKED: this primary AND standby $ip run $STAKED_PUBKEY - switch this primary to its junk key NOW: $(p_setid_hint "$P_JUNK_KEY")"; return 1; }
 status(){
   both_staked_check
-  if [ -s "$FDS_STATE" ]; then cat "$FDS_STATE"; echo; valid_ip "$(state_get ip)" && "$SWAP" status "$(state_get ip)"; else echo "no standby"; fi
+  if [ -s "$ODS_STATE" ]; then cat "$ODS_STATE"; echo; valid_ip "$(state_get ip)" && "$SWAP" status "$(state_get ip)"; else echo "no standby"; fi
   echo "tagged servers at providers:"; list_tagged | sed 's/^/  /'
 }
 
 # ------------------------------------------------------------------ failover / failback
-# run fd-standby-swap; retry ONLY while it reports "refused, nothing changed" (exit 20)
+# run ods-swap; retry ONLY while it reports "refused, nothing changed" (exit 20)
 swap_retry(){ local n=$1 rc; shift
   for _ in $(seq 1 "$n"); do "$SWAP" "$@" --yes --verify=30 </dev/null; rc=$?; [ $rc = 20 ] || return $rc; sleep 20; done; return 20; }
 
 failover(){
   say "FAILOVER: rent a standby and move the staked identity to it"
   [ "$(p_id)" = "$STAKED_PUBKEY" ] || die "this primary is not running the staked identity - nothing to fail over"
-  [ -s "$FDS_STATE" ] && die "a standby is already recorded ($(state_get ip)) - check: fd-standby status"
+  [ -s "$ODS_STATE" ] && die "a standby is already recorded ($(state_get ip)) - check: ods status"
   local why; why=$(p_preflight) || die "not ready for a failover: $why"
   [ "${YES:-0}" = 1 ] || { local a=""; read -r -p "  >>> rent a standby and move the STAKED identity to it? [yes/NO] " a </dev/tty 2>/dev/null || die "no terminal to confirm on: run it in a terminal, or pass --yes"; [ "$a" = yes ] || die "not confirmed"; }
   local ip rc
-  trap 'trap "" INT HUP TERM; say "interrupted before the swap: deleting the standby"; [ -s "$FDS_STATE" ] && down; exit 130' INT HUP TERM
-  ip=$(up) || { [ -s "$FDS_STATE" ] && down; exit 1; }
+  trap 'trap "" INT HUP TERM; say "interrupted before the swap: deleting the standby"; [ -s "$ODS_STATE" ] && down; exit 130' INT HUP TERM
+  ip=$(up) || { [ -s "$ODS_STATE" ] && down; exit 1; }
   "$SWAP" rehearse "$ip" </dev/null >/dev/null 2>&1 || { down; die "rehearsal on standby failed (standby deleted)"; }
   trap 'say "signal ignored: the swap finishes or rolls back first"' INT HUP TERM
   swap_retry 6 to-standby "$ip"; rc=$?
@@ -222,10 +222,10 @@ failover(){
   case $rc in
     0) ;;
     20) down; die "swap to standby refused repeatedly - nothing changed, standby deleted";;
-    *) die "swap to standby INCOMPLETE (see alert for the actual state) - nothing deleted, check: fd-standby status";;
+    *) die "swap to standby INCOMPLETE (see alert for the actual state) - nothing deleted, check: ods status";;
   esac
   say "FAILED OVER: standby $ip ($(state_get provider) $(state_get plan), ~$(state_get region)) votes with $STAKED_PUBKEY."
-  say "Do your work on this primary now. Its validator ($PRIMARY_CLIENT) must come back on its JUNK identity and catch up; then run: fd-standby failback"
+  say "Do your work on this primary now. Its validator ($PRIMARY_CLIENT) must come back on its JUNK identity and catch up; then run: ods failback"
 }
 
 primary_ready(){  # prints the reason when not ready
@@ -237,10 +237,10 @@ primary_ready(){  # prints the reason when not ready
   [ "$lag" -le "$SWAP_MAX_LAG" ] || { echo "primary not caught up (lag $lag)"; return 1; }
 }
 failback(){
-  [ -s "$FDS_STATE" ] && valid_ip "$(state_get ip)" || die "no standby recorded - nothing to fail back from"
+  [ -s "$ODS_STATE" ] && valid_ip "$(state_get ip)" || die "no standby recorded - nothing to fail back from"
   local ip rc why waited=0; ip=$(state_get ip)
   say "FAILBACK: move the staked identity from standby $ip back to this primary, then delete the standby"
-  [ "$(standby_state "$ip")" = staked ] || die "standby $ip is not running the staked identity ($(standby_state "$ip")) - check: fd-standby status"
+  [ "$(standby_state "$ip")" = staked ] || die "standby $ip is not running the staked identity ($(standby_state "$ip")) - check: ods status"
   until why=$(primary_ready); do
     [ "${WAIT:-0}" = 1 ] || die "primary not ready: $why (fix it, or use --wait to wait up to $((CATCHUP_MAX_S/60)) min)"
     ((waited==0)) && say "waiting for the primary: $why"
@@ -251,7 +251,7 @@ failback(){
   trap 'say "signal ignored: the swap finishes or rolls back first"' INT HUP TERM
   swap_retry 10 to-primary "$ip"; rc=$?
   trap - INT HUP TERM
-  [ $rc = 0 ] || die "failback failed (rc $rc); standby $ip left running (state: $(standby_state "$ip")) - check: fd-standby status"
+  [ $rc = 0 ] || die "failback failed (rc $rc); standby $ip left running (state: $(standby_state "$ip")) - check: ods status"
   down
   say "FAILBACK done: this primary votes again, standby deleted"
 }
@@ -261,7 +261,7 @@ qualify(){
   local keep=0; [ "${1:-}" = --keep ] && { keep=1; shift; }
   local prov=$1 plan=$2 region=$3 ip t cold resume=0
   [[ "$prov $plan $region" =~ ^[a-z]+\ [A-Za-z0-9._-]+\ [A-Za-z0-9._-]+$ ]] || die "bad provider/plan/region"
-  if [ -s "$FDS_STATE" ]; then
+  if [ -s "$ODS_STATE" ]; then
     # --keep: resume on the server a previous `qualify --keep` left (same plan and region)
     ((keep)) && [ "$(state_get provider) $(state_get plan) $(state_get region)" = "$prov $plan $region" ] \
       || die "a standby exists (state file) - qualify only runs when no standby is in use"
@@ -270,8 +270,8 @@ qualify(){
   grep -qE "^$prov +${plan//./\\.} +$region " "$CANDIDATES_FILE" || echo "$prov $plan $region no" >> "$CANDIDATES_FILE"
   say "QUALIFY $prov $plan $region (throwaway keys only)$( ((keep)) && echo '; --keep: a failure leaves the server for inspection')$( ((resume)) && echo "; resuming on $(state_get id)")"
   # failure: delete the server, or with --keep leave it (a test run: inspect, fix, run again)
-  qfail(){ if ((keep)); then [ -s "$FDS_STATE" ] && say "server $(state_get provider) $(state_get id) $(state_get ip) KEPT for inspection (billing!): fix, then rerun the same qualify --keep, or delete: fd-standby down"
-           else [ -s "$FDS_STATE" ] && down; fi; die "$1"; }
+  qfail(){ if ((keep)); then [ -s "$ODS_STATE" ] && say "server $(state_get provider) $(state_get id) $(state_get ip) KEPT for inspection (billing!): fix, then rerun the same qualify --keep, or delete: ods down"
+           else [ -s "$ODS_STATE" ] && down; fi; die "$1"; }
   # `up` runs in the background and we `wait` for it: bash runs a trap only between commands, and
   # `wait` is interrupted by a signal at once, while a foreground command (SSH setup, up to
   # SETUP_MAX_S) would delay it. The trap stops `up` and everything it started, then deletes.
@@ -297,7 +297,7 @@ qualify(){
   # same plan = same hardware: qualify the plan in every region (proven in $region)
   local plan_re=${plan//./\\.}
   sed -i -E "s/^($prov +$plan_re +[A-Za-z0-9-]+ +)no\\b.*/\\1yes   # qualified $(date -u +%F) in $region, cold restart ${cold}s/" "$CANDIDATES_FILE"
-  echo "$(date -u +%F) $prov $plan $region cold_restart_s=$cold hw=$hw" >> "$FDS_STATE_DIR/qualifications.log"
+  echo "$(date -u +%F) $prov $plan $region cold_restart_s=$cold hw=$hw" >> "$ODS_STATE_DIR/qualifications.log"
   trap - INT HUP TERM
   say "QUALIFIED $prov $plan $region (cold restart to caught up: ${cold}s; $hw)"
 }
@@ -317,7 +317,7 @@ qualify_queue(){
 watchdog(){
   local now prov id ip created age st tagged; now=$(date +%s)
   tagged=$(list_tagged) || alert "watchdog: provider listing failed - cannot see standbys"
-  if [ -s "$FDS_STATE" ] && valid_ip "$(state_get ip)" && [ "$(p_id)" != "$STAKED_PUBKEY" ] && [ "$(standby_state "$(state_get ip)")" != staked ]; then
+  if [ -s "$ODS_STATE" ] && valid_ip "$(state_get ip)" && [ "$(p_id)" != "$STAKED_PUBKEY" ] && [ "$(standby_state "$(state_get ip)")" != staked ]; then
     alert "watchdog: NEITHER the primary nor standby $(state_get ip) reports the staked identity"; fi
   both_staked_check
   while read -r prov id ip created <&3; do
@@ -330,7 +330,7 @@ watchdog(){
       st=$(valid_ip "$ip" && standby_state "$ip" || echo unknown)
       alert "standby $prov $id ($ip) is ${age} h old, state $st, NOT deleting (it may be voting)"; continue; fi
     alert "watchdog deleting forgotten standby $prov $id ($ip) after ${age} h"
-    destroy_verified "$prov" "$id" </dev/null && { [ "$(state_get id)" = "$id" ] && rm -f "$FDS_STATE"; }
+    destroy_verified "$prov" "$id" </dev/null && { [ "$(state_get id)" = "$id" ] && rm -f "$ODS_STATE"; }
   done 3<<< "$tagged"
 }
 
@@ -340,7 +340,7 @@ doctor(){
   chk(){ local d=$1; shift; if "$@" >/dev/null 2>&1; then printf '  ok   %s\n' "$d"; else printf '  FAIL %s\n' "$d"; bad=1; fi; }
   not_staked(){ [ "$(keypub_local "$1")" != "$STAKED_PUBKEY" ]; }
   staked_ok(){ [ "$(stat -c '%U %a' "$1")" = 'root 600' ] && [ "$(keypub_local "$1")" = "$STAKED_PUBKEY" ]; }
-  echo "config: $FDS_CONF (primary client: $PRIMARY_CLIENT, standby client: $STANDBY_CLIENT)"
+  echo "config: $ODS_CONF (primary client: $PRIMARY_CLIENT, standby client: $STANDBY_CLIENT)"
   p_doctor
   s_doctor
   chk "SSH key for standbys ($SSH_KEY)" test -s "$SSH_KEY.pub"
@@ -350,7 +350,7 @@ doctor(){
   for p in $PROVIDERS; do
     if "${p}_enabled"; then chk "$p API configured and answering" "${p}_list_tagged"; else echo "  --   $p not configured"; fi
   done
-  [ -s "$FDS_STATE" ] && echo "  info a standby is recorded in $FDS_STATE: $(cat "$FDS_STATE")"
+  [ -s "$ODS_STATE" ] && echo "  info a standby is recorded in $ODS_STATE: $(cat "$ODS_STATE")"
   echo "  info qualified candidates in stock now:"; stock_lines | sed 's/^/         /'
   return $bad
 }
@@ -363,15 +363,15 @@ while [ $# -gt 0 ]; do case "$1" in
 export ANY PLAN REGION
 case "$CMD" in
   ""|-h|--help|help) sed -n 2,19p "$0"; exit 0 ;;
-  watchdog) [ -r "$FDS_CONF" ] || exit 0 ;;            # timer before configuration: nothing to do
+  watchdog) [ -r "$ODS_CONF" ] || exit 0 ;;            # timer before configuration: nothing to do
 esac
-fds_load_config
+ods_load_config
 case "$CMD" in
-  up|down|failover|failback|qualify|qualify-queue|bundle|setup) fds_lock_or_exit ;;
-  watchdog) exec 9>>"$FDS_STATE_DIR/lock"
+  up|down|failover|failback|qualify|qualify-queue|bundle|setup) ods_lock_or_exit ;;
+  watchdog) exec 9>>"$ODS_STATE_DIR/lock"
             if ! flock -n 9; then   # an operation runs; only complain if it runs suspiciously long
-              (( $(date +%s) - $(stat -c %Y "$FDS_STATE_DIR/lock") > 3*3600 )) && alert "fd-standby lock held for more than 3 h - check for a stuck operation"
-              exit 0; fi; export FDS_LOCK_HELD=1 ;;
+              (( $(date +%s) - $(stat -c %Y "$ODS_STATE_DIR/lock") > 3*3600 )) && alert "ods lock held for more than 3 h - check for a stuck operation"
+              exit 0; fi; export ODS_LOCK_HELD=1 ;;
 esac
 case "$CMD" in
   doctor) doctor ;;
@@ -382,7 +382,7 @@ case "$CMD" in
   status) status ;;
   failover) failover ;;
   failback) failback ;;
-  qualify) [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$1" = --keep ]; } || { echo "usage: fd-standby qualify [--keep] PROVIDER PLAN REGION"; exit 2; }; qualify "$@" ;;
+  qualify) [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$1" = --keep ]; } || { echo "usage: ods qualify [--keep] PROVIDER PLAN REGION"; exit 2; }; qualify "$@" ;;
   setup) setup_recorded ;;
   qualify-queue) qualify_queue ;;
   watchdog) watchdog ;;

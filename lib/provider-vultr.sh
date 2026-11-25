@@ -15,7 +15,7 @@ vultr_sshkey_id(){
 pub=sys.argv[1]
 for k in json.load(sys.stdin).get("ssh_keys",[]):
     if " ".join(k["ssh_key"].split()[:2])==pub: print(k["id"]); break' "$pub")
-  [ -n "$id" ] || id=$(vu -X POST "$VU_API/ssh-keys" -d "{\"name\":\"fd-standby\",\"ssh_key\":\"$(cat "$SSH_KEY.pub")\"}" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("ssh_key",{}).get("id",""))')
+  [ -n "$id" ] || id=$(vu -X POST "$VU_API/ssh-keys" -d "{\"name\":\"ods\",\"ssh_key\":\"$(cat "$SSH_KEY.pub")\"}" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("ssh_key",{}).get("id",""))')
   echo "$id"
 }
 
@@ -34,7 +34,7 @@ vultr_create(){
   local plan=$1 region=$2 host=$3 kid os r id
   kid=$(vultr_sshkey_id); [ -n "$kid" ] || { say "vultr: cannot register SSH key"; return; }
   for os in $VULTR_OS_IDS; do
-    r=$(vu -X POST "$VU_API/bare-metals" -d "{\"region\":\"$region\",\"plan\":\"$plan\",\"os_id\":$os,\"sshkey_id\":[\"$kid\"],\"hostname\":\"$host\",\"label\":\"$host\",\"tags\":[\"fd-standby\",\"$FDS_OWNER_TAG\"],\"enable_ipv6\":false}")
+    r=$(vu -X POST "$VU_API/bare-metals" -d "{\"region\":\"$region\",\"plan\":\"$plan\",\"os_id\":$os,\"sshkey_id\":[\"$kid\"],\"hostname\":\"$host\",\"label\":\"$host\",\"tags\":[\"ods\",\"$ODS_OWNER_TAG\"],\"enable_ipv6\":false}")
     id=$(echo "$r" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("bare_metal",{}).get("id",""))' 2>/dev/null)
     [ -n "$id" ] && { echo "$id"; return; }
     say "vultr create (os $os) failed: $(echo "$r" | head -c 300)"
@@ -53,7 +53,7 @@ print("ready "+b["main_ip"] if ok else "wait")'
 vultr_destroy(){ vu -X DELETE -o /dev/null -w '%{http_code}' "$VU_API/bare-metals/$1"; }
 
 vultr_list_tagged(){
-  vu "$VU_API/bare-metals?tag=$FDS_OWNER_TAG" | python3 -I -c 'import json,sys,datetime
+  vu "$VU_API/bare-metals?tag=$ODS_OWNER_TAG" | python3 -I -c 'import json,sys,datetime
 for b in json.load(sys.stdin).get("bare_metals",[]):
     print("vultr", b["id"], b.get("main_ip","-"), int(datetime.datetime.fromisoformat(b["date_created"]).timestamp()))'
 }

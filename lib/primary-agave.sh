@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # variables are used by the scripts that source this file
 # Agave node adapter (incl. Jito-Agave). Sourced by lib/common.sh when PRIMARY_CLIENT=agave, and
-# shipped to an Agave standby where standby/fds-node runs the same functions for the standby.
+# shipped to an Agave standby where standby/ods-node runs the same functions for the standby.
 # Same functions and contracts as lib/primary-firedancer.sh (see the list at its top).
 #
 # Verified against agave-validator 4.4.0 (Jito, src:3a8c7fc3) --help and source:
@@ -30,7 +30,7 @@
 # nor the validator needs to read the root-only staked key file.
 
 p_load_config(){
-  : "${AGAVE_BIN:?set AGAVE_BIN in $FDS_CONF}" "${AGAVE_LEDGER:?set AGAVE_LEDGER in $FDS_CONF}" "${AGAVE_JUNK_KEY:?set AGAVE_JUNK_KEY in $FDS_CONF}"
+  : "${AGAVE_BIN:?set AGAVE_BIN in $ODS_CONF}" "${AGAVE_LEDGER:?set AGAVE_LEDGER in $ODS_CONF}" "${AGAVE_JUNK_KEY:?set AGAVE_JUNK_KEY in $ODS_CONF}"
   AGAVE_KEYGEN=${AGAVE_KEYGEN:-$(dirname "$AGAVE_BIN")/solana-keygen}
   AGAVE_RPC_URL=${AGAVE_RPC_URL:-http://127.0.0.1:8899}
   AGAVE_MIN_IDLE_MIN=${AGAVE_MIN_IDLE_MIN:-2}
@@ -87,8 +87,8 @@ p_setid(){ local vh="" key pk dst out rc
     dst=$AGAVE_LEDGER/vote_history-$pk.bin
     if [ "$(readlink -f "$vh")" != "$(readlink -f "$dst")" ]; then
       [ -s "$vh" ] || { echo "vote history $vh missing/empty" >&2; return $P_SETID_REFUSED; }
-      if [ -e "$dst" ]; then cp -p "$dst" "$dst.fds-replaced" || return $P_SETID_REFUSED; fi   # keep what we replace
-      { cp "$vh" "$dst.fds-tmp" && chown "$P_OWNER:$P_GROUP" "$dst.fds-tmp" && chmod 644 "$dst.fds-tmp" && mv -f "$dst.fds-tmp" "$dst" && cmp -s "$vh" "$dst"; } \
+      if [ -e "$dst" ]; then cp -p "$dst" "$dst.ods-replaced" || return $P_SETID_REFUSED; fi   # keep what we replace
+      { cp "$vh" "$dst.ods-tmp" && chown "$P_OWNER:$P_GROUP" "$dst.ods-tmp" && chmod 644 "$dst.ods-tmp" && mv -f "$dst.ods-tmp" "$dst" && cmp -s "$vh" "$dst"; } \
         || { echo "cannot install $vh as $dst" >&2; return $P_SETID_REFUSED; }
     fi
   fi

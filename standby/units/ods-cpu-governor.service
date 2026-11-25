@@ -1,5 +1,5 @@
 [Unit]
-Description=CPU frequency governor = performance (fd-standby)
+Description=CPU frequency governor = performance (ods)
 
 [Service]
 Type=oneshot

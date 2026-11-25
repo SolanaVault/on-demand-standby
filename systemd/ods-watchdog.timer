@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the fd-standby watchdog every 15 minutes
+Description=Run the ods watchdog every 15 minutes
 [Timer]
 OnBootSec=5min
 OnUnitActiveSec=15min
