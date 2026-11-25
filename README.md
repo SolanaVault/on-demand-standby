@@ -42,14 +42,14 @@ Example (Firedancer primary, a real run; some lines left out):
 ```
 $ ods failover --yes
 [10:54:58] creating cherry amd-threadripper-pro-7965wx in LT-Siauliai (~1.676/h)
-[11:05:29] delivered in 10 min: 88.216.197.107
-[11:05:31] firewall loaded (SSH only from 5.199.170.91); waiting for confirmation
+[11:05:29] delivered in 10 min: 198.51.100.7
+[11:05:31] firewall loaded (SSH only from 203.0.113.10); waiting for confirmation
 [11:05:36] endpoints: jito: region frankfurt (29.5 ms; ... measured: frankfurt=29 amsterdam=36 ...)
 ...
 [11:29:34] 3/5 primary: switch to junk (voting stops)
 [11:29:35] 4/5 fresh vote history -> standby, standby -> STAKED
   voting gap ~3.3 s
-[11:30:31] FAILED OVER: standby 88.216.197.107 (...) votes with <staked pubkey>.
+[11:30:31] FAILED OVER: standby 198.51.100.7 (...) votes with <staked pubkey>.
 
 $ systemctl restart firedancer        # <- your maintenance: upgrade, reboot, whatever
 
@@ -90,7 +90,7 @@ swaps, each on one validator so far:
 | Firedancer → Agave | Not supported |
 | Frankendancer, either side | Not supported |
 
-Read [SAFETY.md](SAFETY.md) before using it on a staked validator.
+Read [SAFETY.md](SAFETY.md) before using it on a staked validator. Report security issues privately, see [SECURITY.md](SECURITY.md).
 
 ## Qualified servers
 

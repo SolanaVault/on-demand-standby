@@ -84,9 +84,6 @@ failover/failback with the staked key, plus a primary restart (config change) wh
 voted: votor gaps 0.64 s (failover) and 1.09 s (failback), taken from both validators' votor log
 lines, after the timing work (one multiplexed SSH connection, the remote steps merged into one call
 each way, the log path resolved before the switch, no fixed quiet wait). Before it: ~13.6 s / ~24 s.
-**Earlier note (kept for history):** the standby setup on a rented server and a real staked swap
-had not been run when this section was first written. Qualify a server
-type (`ods qualify`, throwaway keys) and do one failover/failback while watching.
 
 With an Agave primary and a *Firedancer* standby, the vote history crosses clients: Agave →
 Firedancer has been used on mainnet, Firedancer → Agave has not. Prove it on testnet first.

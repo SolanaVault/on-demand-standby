@@ -5,8 +5,13 @@
 The most useful contribution: prove that another server type works, so that more types can be
 used when one is out of stock.
 
-1. Make sure the type is in `config/candidates.conf` (or add a row with `no`). It must be a
-   standard, immediately deployable plan with ≥48 threads, ≥256 GB RAM and NVMe.
+Server types are qualified per standby client: `config/candidates.conf` (Firedancer standby) and
+`config/candidates-agave.conf` (Agave standby). `ods qualify` uses the file of your configured
+standby client.
+
+1. Make sure the type is in the candidates file of your standby client (or add a row with `no`).
+   It must be a standard, immediately deployable plan with NVMe and enough threads and RAM for the
+   client (see "Standby (rented)" in the README; `ods qualify` checks it).
 2. Run, on your primary:
    ```bash
    ods qualify PROVIDER PLAN REGION
@@ -19,7 +24,7 @@ used when one is out of stock.
    ```
    2026-11-24 cherry amd-epyc-9275f LT-Siauliai cold_restart_s=157 hw=48|377|1.7T ...
    ```
-   plus your Firedancer version (`firedancer --version`).
+   plus your client version (`firedancer --version` or `agave-validator --version`).
 
 Please do not mark a type `yes` without having run it. If a type fails (hardware check, catch-up,
 rehearsal), a PR that records the failure (as a comment on the row) is just as welcome.
@@ -34,7 +39,11 @@ and deletion that stops billing.
 
 ## Code changes
 
-- `shellcheck -x -S warning bin/* lib/*.sh standby/*.sh install.sh` must be clean.
+- `shellcheck -x -S warning bin/ods bin/ods-swap lib/*.sh standby/standby-init.sh standby/ods-node install.sh`
+  must be clean (the same check runs in CI).
 - Anything that touches the staked key, `set-identity` or vote history needs a description of how
   you tested it, and must keep every invariant in [SAFETY.md](SAFETY.md).
-- No secrets, account ids, IP addresses or hostnames in commits.
+- No secrets, account ids, IP addresses or hostnames in commits (use documentation addresses such
+  as 192.0.2.x / 198.51.100.x / 203.0.113.x in examples).
+- Run `python3 tools/render-qualified.py` after changing a candidates file; it regenerates the
+  README tables.
