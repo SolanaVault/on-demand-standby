@@ -99,20 +99,33 @@ clients need different hardware and setups: each one was **actually tested** wit
 throwaway keys, timed cold restart, deleted. Same plan = same hardware, so a plan proven in one
 region is allowed in every region where the provider offers it.
 
-<!-- QUALIFIED-TABLE:BEGIN -->
-| Provider | Plan | CPU | RAM | Disks | €/h | Regions | Firedancer standby | Agave standby |
-|---|---|---|---|---|---|---|---|---|
-| cherry | `amd-epyc-9275f` | AMD EPYC 9275F (24c/48t, 4.10 GHz) | 384 GB | 2x NVMe 1TB + 2x NVMe 2TB | 1.50 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam | qualified 2026-11-24 in LT-Siauliai: delivered 14 min, cold restart 157 s; 2026-11-24 real failover/failback (LT): delivered 13 min, caught up 153 s, gaps 4.0 s / 4.4 s | not qualified |
-| cherry | `amd-threadripper-pro-7965wx` | AMD Threadripper PRO 7965WX (24c/48t, 4.20 GHz) | 512 GB | 2x NVMe 1TB + 2x NVMe 4TB | 1.68 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-23 (LT): delivered 10-12 min, cold restart 137 s, 4 real staked swaps + 1 full maintenance; 2026-11-25 full maintenance (ods): delivered 10 min, gaps 3.3 s / 2.8 s | qualified 2026-11-25 in LT-Siauliai, cold restart 352s |
-| cherry | `amd-threadripper-pro-7975wx` | AMD Threadripper PRO 7975WX (32c/64t, 4.00 GHz) | 768 GB | 2x NVMe 1TB + 2x NVMe 4TB | 2.14 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-24 in DE-Frankfurt: delivered 11 min, cold restart 286 s | qualified 2026-11-25 in DE-Frankfurt, cold restart 312s |
-| cherry | `amd-epyc-9575F` | AMD EPYC 9575F (64c/128t, 3.30 GHz) | 384 GB | 2x NVMe 1TB + 2x NVMe 3TB | 2.31 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-24 in LT-Siauliai: delivered 13 min, cold restart 140 s (128 threads) | qualified 2026-11-25 in DE-Frankfurt, cold restart 190s |
-<!-- QUALIFIED-TABLE:END -->
+### Firedancer standby
+
+<!-- QUALIFIED-TABLE-FIREDANCER:BEGIN -->
+| Provider | Plan | CPU | RAM | Disks | €/h | Regions | Evidence |
+|---|---|---|---|---|---|---|---|
+| cherry | `amd-epyc-9275f` | AMD EPYC 9275F (24c/48t, 4.10 GHz) | 384 GB | 2x NVMe 1TB + 2x NVMe 2TB | 1.50 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam | qualified 2026-11-24 in LT-Siauliai: delivered 14 min, cold restart 157 s; 2026-11-24 real failover/failback (LT): delivered 13 min, caught up 153 s, gaps 4.0 s / 4.4 s |
+| cherry | `amd-threadripper-pro-7965wx` | AMD Threadripper PRO 7965WX (24c/48t, 4.20 GHz) | 512 GB | 2x NVMe 1TB + 2x NVMe 4TB | 1.68 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-23 (LT): delivered 10-12 min, cold restart 137 s, 4 real staked swaps + 1 full maintenance; 2026-11-25 full maintenance (ods): delivered 10 min, gaps 3.3 s / 2.8 s |
+| cherry | `amd-threadripper-pro-7975wx` | AMD Threadripper PRO 7975WX (32c/64t, 4.00 GHz) | 768 GB | 2x NVMe 1TB + 2x NVMe 4TB | 2.14 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-24 in DE-Frankfurt: delivered 11 min, cold restart 286 s |
+| cherry | `amd-epyc-9575F` | AMD EPYC 9575F (64c/128t, 3.30 GHz) | 384 GB | 2x NVMe 1TB + 2x NVMe 3TB | 2.31 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-24 in LT-Siauliai: delivered 13 min, cold restart 140 s (128 threads) |
+<!-- QUALIFIED-TABLE-FIREDANCER:END -->
+
+### Agave standby
+
+<!-- QUALIFIED-TABLE-AGAVE:BEGIN -->
+| Provider | Plan | CPU | RAM | Disks | €/h | Regions | Evidence |
+|---|---|---|---|---|---|---|---|
+| cherry | `amd-threadripper-pro-7965wx` | AMD Threadripper PRO 7965WX (24c/48t, 4.20 GHz) | 512 GB | 2x NVMe 1TB + 2x NVMe 4TB | 1.68 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-25 in LT-Siauliai, cold restart 352s |
+| cherry | `amd-threadripper-pro-7975wx` | AMD Threadripper PRO 7975WX (32c/64t, 4.00 GHz) | 768 GB | 2x NVMe 1TB + 2x NVMe 4TB | 2.14 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-25 in DE-Frankfurt, cold restart 312s |
+| cherry | `amd-epyc-9575F` | AMD EPYC 9575F (64c/128t, 3.30 GHz) | 384 GB | 2x NVMe 1TB + 2x NVMe 3TB | 2.31 | DE-Frankfurt, LT-Siauliai, NL-Amsterdam, SE-Stockholm | qualified 2026-11-25 in DE-Frankfurt, cold restart 190s |
+<!-- QUALIFIED-TABLE-AGAVE:END -->
 
 "Cold restart" = the standby's validator restarted with no local snapshot until caught up, snapshot
 from [snappie.sh](https://snappie.sh). Delivery times are what Cherry needed for that order (Cherry
-quotes 15–30 minutes for in-stock standard plans). The table is generated from
+quotes 15–30 minutes for in-stock standard plans). The tables are generated from
 [config/candidates.conf](config/candidates.conf) (Firedancer) and
 [config/candidates-agave.conf](config/candidates-agave.conf) (Agave) by `tools/render-qualified.py`.
+An Agave primary with a Firedancer standby uses the Firedancer table.
 
 Types listed as `no` there are eligible on paper but not yet tested. **The community is very
 welcome to add qualified types**: run `ods qualify` and open a pull request with the evidence line
