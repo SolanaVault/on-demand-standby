@@ -2,8 +2,9 @@
 
 **Zero-downtime maintenance for a single Solana validator, Agave or Firedancer, with a standby you rent by the hour.**
 
-Commands: `ods` (**o**n-**d**emand **s**tandby) and `ods-swap`. A community tool, not affiliated
-with Anza, Jump Crypto, the Firedancer project, Jito or any server provider.
+Commands: `ods` (**o**n-**d**emand **s**tandby) and `ods-swap`. A community tool provided by
+Rockooor and the Vault. Battle-tested on mainnet on **mesh**, with real swaps of its staked identity
+key (`meshRrDTME9cL2FSQ9E56EncfkZ7vL8apwcCFsw3o6Y`).
 
 You run one validator. Before you take it down (an upgrade, a reboot, a disk swap, anything) you run
 **`ods failover`**:
