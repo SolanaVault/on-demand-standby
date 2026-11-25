@@ -19,7 +19,7 @@ CLIENT=${CLIENT:-firedancer}
 # Regional endpoints (Jito, BAM, Harmonic, ...): the region closest to THIS machine, per provider
 # (config/regional-endpoints.conf). Only endpoints the primary uses are changed; nothing is added.
 localize(){ local fmt=$1; shift
-  python3 -I ./localize-endpoints.py config/regional-endpoints.conf "$fmt" "$@" ${REGIONS:+--force "$REGIONS"} 2>&1 | while read -r l; do log "endpoints: $l"; done
+  python3 -I ./localize-endpoints.py config/regional-endpoints.conf "$fmt" "$@" 2>&1 | while read -r l; do log "endpoints: $l"; done
   return "${PIPESTATUS[0]}"; }
 
 # Stages (run in this order by ods, each in its own SSH call):

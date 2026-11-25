@@ -28,7 +28,6 @@ ods_load_config(){
   SSH_KEY=${SSH_KEY:-/root/.ssh/id_ed25519_ods}
   # regional endpoint table (shipped with the code; set REGIONAL_ENDPOINTS to use your own copy)
   REGIONAL_ENDPOINTS=${REGIONAL_ENDPOINTS:-$ODS_ROOT/config/regional-endpoints.conf}
-  [[ "${STANDBY_REGIONS:-}" =~ ^([a-z0-9_-]+=[A-Za-z0-9_-]+( +|$))*$ ]] || { echo "STANDBY_REGIONS must be 'provider=region ...'" >&2; exit 2; }
   MAX_PRICE_PER_HOUR=${MAX_PRICE_PER_HOUR:-3.0}; USD_TO_EUR=${USD_TO_EUR:-0.92}
   DELIVERY_MAX_S=${DELIVERY_MAX_S:-2700}; CATCHUP_MAX_S=${CATCHUP_MAX_S:-3600}; SETUP_MAX_S=${SETUP_MAX_S:-7200}; SWAP_MAX_LAG=${SWAP_MAX_LAG:-30}
   WATCHDOG_ALERT_AFTER_H=${WATCHDOG_ALERT_AFTER_H:-3}; WATCHDOG_DELETE_AFTER_H=${WATCHDOG_DELETE_AFTER_H:-6}
@@ -103,6 +102,8 @@ sshs(){ local h=$1 mux=(); shift
 
 # --- regional endpoints (standby/localize-endpoints.py): "provider: role@region, ..." per line
 endpoints_plan(){ python3 -I "$ODS_ROOT/standby/localize-endpoints.py" "$REGIONAL_ENDPOINTS" "$@" --plan; }
+# measured from THIS machine: exit 1 if a provider's endpoints are not in the closest region
+endpoints_check(){ python3 -I "$ODS_ROOT/standby/localize-endpoints.py" "$REGIONAL_ENDPOINTS" "$@" --check; }
 endpoints_providers(){ endpoints_plan "$@" 2>/dev/null | cut -d: -f1 | sort | tr '\n' ' '; }
 
 # --- public RPC

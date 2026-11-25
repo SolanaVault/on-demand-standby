@@ -65,7 +65,7 @@ bundle(){
   cp "$ODS_ROOT/standby/standby-init.sh" "$ODS_ROOT/standby/localize-endpoints.py" "$ODS_ROOT/standby/60-ods-tcp-rmem.conf" "$d/"
   cp "$ODS_ROOT/standby/units/ods-cpu-governor.service" "$d/units/"
   cp "$REGIONAL_ENDPOINTS" "$d/config/regional-endpoints.conf"
-  printf 'CLIENT=%q\nFD_USER=%q\nFD_NAME=%q\nREGIONS=%q\n' "$STANDBY_CLIENT" "$S_USER" "$S_NAME" "${STANDBY_REGIONS:-}" > "$d/config/standby.env"
+  printf 'CLIENT=%q\nFD_USER=%q\nFD_NAME=%q\n' "$STANDBY_CLIENT" "$S_USER" "$S_NAME" > "$d/config/standby.env"
   info=$(s_bundle "$d") || { rm -rf "$d"; die "cannot build the $STANDBY_CLIENT standby bundle"; }
   endpoint_plan "$d" | sed 's/^/  /' >&2      # stdout of up() is the IP
   tar -C "$d" -czf "$BUNDLE_TGZ" . && rm -rf "$d"
@@ -131,8 +131,18 @@ provision(){ local prov=$1 id=$2 plan=$3 region=$4 t0=$5 pip=$6 s ip="" w=0
   init --setup | grep -E '^\[|^RESULT' | tee >(cat >&2) | grep '^RESULT {"ok":true' >/dev/null \
     || die "standby setup failed on $ip (left for inspection; fix, then: ods setup | or delete: ods down)"
   say "waiting for the standby to catch up"
+  # A start can fail for reasons outside the box (snapshot source stalls, entrypoints do not
+  # answer) until systemd's start limit stops the unit. The standby holds only its junk identity
+  # here, so restarting it is safe; give up after CATCHUP_RESTARTS restarts.
+  local kicks=0
   until s_caught_up "$ip" </dev/null 2>/dev/null; do
-    sleep 15; w=$((w+15)); ((w>CATCHUP_MAX_S)) && die "standby $ip did not catch up in $((CATCHUP_MAX_S/60)) min (left running: ods down)"; done
+    sleep 15; w=$((w+15)); ((w>CATCHUP_MAX_S)) && die "standby $ip did not catch up in $((CATCHUP_MAX_S/60)) min (left running: ods down)"
+    if [ "$(sshs "$ip" "systemctl is-failed $S_UNIT" </dev/null 2>/dev/null)" = failed ]; then
+      ((kicks>=${CATCHUP_RESTARTS:-3})) && die "standby $S_UNIT on $ip failed again after $kicks restarts (left for inspection: ods down)"
+      kicks=$((kicks+1)); say "standby $S_UNIT stopped by systemd (start limit) - restart $kicks/${CATCHUP_RESTARTS:-3}"
+      sshs "$ip" "journalctl -u $S_UNIT -n 3 --no-pager -o cat; systemctl reset-failed $S_UNIT; systemctl start $S_UNIT" </dev/null 2>&1 | sed 's/^/    /' >&2
+    fi
+  done
   say "standby caught up (lag $(lag_of "$(s_slot "$ip" </dev/null)"))"
   say "standby ready: $prov $plan $region $ip (total $(( ($(date +%s)-t0)/60 )) min)"
   echo "$ip"; }
@@ -335,6 +345,17 @@ watchdog(){
 }
 
 # ------------------------------------------------------------------ doctor (changes nothing)
+# the primary's own regional endpoints, measured from this primary (a warning, not a failure:
+# it costs latency, not safety). Same measurement the standby uses to choose its endpoints.
+primary_endpoints_check(){ local t out rc pid
+  if [ "$PRIMARY_CLIENT" = agave ]; then
+    pid=$(p_pid); [ -n "$pid" ] || { echo "  --   regional endpoints of this primary: validator not running"; return 0; }
+    t=$(mktemp); tr '\0' '\n' < "/proc/$pid/cmdline" > "$t"; out=$(endpoints_check args "$t" 2>&1); rc=$?; rm -f "$t"
+  else out=$(endpoints_check toml "$PRIMARY_FD_CONFIG" 2>&1); rc=$?; fi
+  if [ -z "$out" ]; then echo "  --   regional endpoints of this primary: none"
+  elif [ $rc = 0 ]; then echo "  ok   this primary uses the closest region per provider (measured here)"; sed 's/^/         /' <<<"$out"
+  else echo "  WARN this primary does NOT use the closest region (measured here; fix your validator config):"; sed 's/^/         /' <<<"$out"; fi
+}
 doctor(){
   local bad=0 p
   chk(){ local d=$1; shift; if "$@" >/dev/null 2>&1; then printf '  ok   %s\n' "$d"; else printf '  FAIL %s\n' "$d"; bad=1; fi; }
@@ -342,6 +363,7 @@ doctor(){
   staked_ok(){ [ "$(stat -c '%U %a' "$1")" = 'root 600' ] && [ "$(keypub_local "$1")" = "$STAKED_PUBKEY" ]; }
   echo "config: $ODS_CONF (primary client: $PRIMARY_CLIENT, standby client: $STANDBY_CLIENT)"
   p_doctor
+  primary_endpoints_check
   s_doctor
   chk "SSH key for standbys ($SSH_KEY)" test -s "$SSH_KEY.pub"
   chk "candidates file ($CANDIDATES_FILE)" test -s "$CANDIDATES_FILE"

@@ -70,8 +70,8 @@ FD_BIN=/opt/firedancer/bin/firedancer
 # --- Regional endpoints (both clients). The primary's Jito / BAM / Harmonic / shred-relay endpoints
 # are re-pointed on the standby to the region closest to the STANDBY (ping, per provider; table:
 # config/regional-endpoints.conf, or your own copy in REGIONAL_ENDPOINTS). Only endpoints the
-# primary uses; a provider the primary does not use is never added. To pin a region instead:
-#STANDBY_REGIONS="jito=frankfurt bam=fra harmonic=fra"
+# primary uses; a provider the primary does not use is never added. The region is always measured
+# from the box itself, never configured; `ods doctor` measures this primary the same way.
 #REGIONAL_ENDPOINTS=/etc/ods/regional-endpoints.conf
 
 # --- STANDBY_CLIENT=firedancer for an Agave primary: Firedancer build and config template
@@ -115,6 +115,8 @@ STANDBY_DROP_MULTICAST=1
 DELIVERY_MAX_S=2700
 # Max time for a standby / the primary to catch up after start.
 CATCHUP_MAX_S=3600
+# Restarts of a standby whose validator systemd stopped (start limit) while catching up.
+CATCHUP_RESTARTS=3
 # Lag threshold (slots) vs public RPC for "caught up" before a swap. Firedancer's
 # replay_reset_slot and Agave's finalized slot are normally 0-20 behind the RPC tip.
 SWAP_MAX_LAG=30

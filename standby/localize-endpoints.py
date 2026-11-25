@@ -4,8 +4,11 @@ THIS machine. Table and rules: config/regional-endpoints.conf.
 
   localize-endpoints.py TABLE {args|toml} FILE [FILE...] --plan
       (primary) print the regional endpoints FILE uses, and unknown hosts under listed domains
-  localize-endpoints.py TABLE {args|toml} FILE [FILE...] [--force provider=region ...]
+  localize-endpoints.py TABLE {args|toml} FILE [FILE...] --check
+      (primary) measure from THIS machine; exit 1 if FILE uses a region that is not the closest
+  localize-endpoints.py TABLE {args|toml} FILE [FILE...]
       (standby) measure, choose a region per provider, rewrite FILE(s) in place
+The region is always inferred by measuring from the machine this runs on; it is never configured.
 
 FILE: `args` = one command-line argument per line; `toml` = a Firedancer config (only string
 values are touched, the formatting stays). All FILEs share one choice per provider.
@@ -122,12 +125,7 @@ def toml_strings(text):
 
 def main():
     a = sys.argv[1:]
-    plan = '--plan' in a; a = [x for x in a if x != '--plan']
-    force = {}
-    while '--force' in a:
-        i = a.index('--force'); kv = a[i + 1]; del a[i:i + 2]
-        for item in kv.split():
-            k, _, v = item.partition('='); force[k] = v
+    plan = '--plan' in a; check = '--check' in a; a = [x for x in a if x not in ('--plan', '--check')]
     if len(a) < 3 or a[1] not in ('args', 'toml'): sys.exit(__doc__)
     L = Localizer(load_table(a[0])); fmt, files = a[1], a[2:]
     texts = {f: open(f).read() for f in files}
@@ -146,11 +144,9 @@ def main():
         for p, roles in sorted(allp.items()):
             print(f'{p}: ' + ', '.join(f'{role}@{"/".join(sorted(regs))}' for role, regs in sorted(roles.items())))
         return
+    bad = 0
     for p in sorted(L.used):
         regs = L.regions(p)
-        if p in force:
-            if force[p] not in regs: sys.exit(f'STANDBY_REGIONS: {p}={force[p]} is not a region with {"/".join(sorted(L.used[p]))} (have: {" ".join(regs)})')
-            L.choice[p] = force[p]; print(f'{p}: region {force[p]} (STANDBY_REGIONS)'); continue
         hosts = sorted({h for g in regs for role in L.used[p] for h in L.hosts(p, role, g)})
         with concurrent.futures.ThreadPoolExecutor(16) as ex:
             rtt = dict(zip(hosts, ex.map(rtt_ms, hosts)))
@@ -165,9 +161,18 @@ def main():
         old = next(iter(olds)) if len(olds) == 1 else None
         if old in reg_rtt and reg_rtt[old] <= reg_rtt[best] + 0.5: best = old   # no change for <0.5 ms
         L.choice[p] = best
+        if check:
+            if best == old: print(f'{p}: ok, uses the closest region {best} ({reg_rtt[best]:.1f} ms)')
+            else:
+                bad += 1
+                print(f'{p}: NOT CLOSEST: this machine uses ' + ', '.join(f'{role}@{"/".join(sorted(rg))}' for role, rg in sorted(L.used[p].items()))
+                      + f'; closest region with every role is {best} ({reg_rtt[best]:.1f} ms; measured: '
+                      + ' '.join(f'{g}={reg_rtt[g]:.0f}' for g in sorted(reg_rtt, key=reg_rtt.get)) + ')')
+            continue
         print(f'{p}: region {best} ({reg_rtt[best]:.1f} ms; primary uses {"/".join(sorted(olds))}'
               + (f' {reg_rtt[old]:.1f} ms' if old in reg_rtt else '') + '; measured: '
               + ' '.join(f'{g}={reg_rtt[g]:.0f}' for g in sorted(reg_rtt, key=reg_rtt.get)) + ')')
+    if check: sys.exit(1 if bad else 0)
     for f in files:
         if fmt == 'args':
             out, seen, group = [], set(), []
